@@ -47,18 +47,23 @@ def style_sla(row):
     except: pass
     return [f'background-color: {color}; color: {text_color}' if name == 'tempo_hub' else '' for name in row.index]
 
-# --- 3. CARREGAMENTO DE DADOS COM CACHE ---
-@st.cache_data(ttl=600)
+# --- 3. CARREGAMENTO SEM CACHE (PARA TESTE) ---
 def carregar_bases_sql():
     try:
+        # Tenta buscar apenas 1 linha para testar a pulsação do banco
+        teste = conn.table("base_cluster").select("*").limit(1).execute()
+        if teste.data:
+            st.success("✅ Pulsação detectada! O banco respondeu.")
+        else:
+            st.warning("⚠️ Banco conectado, mas a tabela 'base_cluster' parece vazia.")
+            
         spx = conn.table("base_spx").select("*").execute()
         cluster = conn.table("base_cluster").select("*").execute()
         fleet = conn.table("base_fleet").select("*").execute()
         return pd.DataFrame(spx.data), pd.DataFrame(cluster.data), pd.DataFrame(fleet.data)
-    except:
+    except Exception as e:
+        st.error(f"🚨 ERRO DE CONEXÃO: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-df_spx, df_cluster, df_fleet_base = carregar_bases_sql()
 
 # --- 4. INTERFACE PRINCIPAL ---
 tab_aloc, tab_fleet, tab_admin = st.tabs(["🎯 Alocador", "🚚 Fleet", "⚙️ Admin Bases"])
@@ -148,4 +153,5 @@ with tab_admin:
                     st.cache_data.clear()
                 except Exception as e:
                     st.error(f"Erro técnico ao inserir no banco: {e}")
+
 
