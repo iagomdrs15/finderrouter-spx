@@ -10,49 +10,61 @@ conn = st.connection("supabase", type=SupabaseConnection)
 
 HUB_LAT, HUB_LON = -8.791172513071563, -63.847713631142135
 
-# --- 2. O DETERMINANTE (TRADUTOR DE COLUNAS) ---
-def normalizar_colunas(df, mapa_sinonimos):
-    """
-    Traduz os nomes das colunas do banco/CSV para os nomes que o código usa.
-    Exemplo: Se no banco estiver 'Pedido', ele vira 'order_id'.
-    """
+# --- 2. O DETERMINANTE (TRADUTOR DE COLUNAS FLEXÍVEL) ---
+def normalizar_dados(df, mapa_sinonimos):
+    """Limpa colunas, traduz nomes e remove espaços invisíveis"""
+    if df.empty: return df
+    
+    # Limpa nomes das colunas (tira espaços, pontos e deixa minúsculo)
+    df.columns = [str(c).lower().strip().replace(" ", "_").replace(".", "") for c in df.columns]
+    
+    # Tradução de sinônimos
     for nome_correto, sinonimos in mapa_sinonimos.items():
         for s in sinonimos:
-            # Busca ignorando maiúsculas/minúsculas e espaços
-            col_encontrada = next((c for c in df.columns if c.lower().strip() == s.lower()), None)
-            if col_encontrada:
-                df = df.rename(columns={col_encontrada: nome_correto})
+            if s in df.columns:
+                df = df.rename(columns={s: nome_correto})
                 break
+    
+    # Limpeza de conteúdo (tira espaços de dentro das células de texto)
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col] = df[col].astype(str).str.strip()
+        
     return df
 
-# Definição dos sinônimos baseados no que costuma vir nos Sheets/CSVs
 SINONIMOS = {
-    'order_id': ['order_id', 'pedido', 'id', 'order', 'rastreio'],
-    'latitude': ['latitude', 'lat', 'lat_y', 'y'],
-    'longitude': ['longitude', 'long', 'lng', 'lon', 'x'],
-    'corridor_cage': ['corridor_cage', 'gaiola', 'cluster', 'corredor'],
-    'driver_id': ['driver_id', 'id_motorista', 'id', 'cpf'],
-    'driver_name': ['driver_name', 'nome', 'motorista'],
-    'license_plate': ['license_plate', 'placa', 'veiculo']
+    'order_id': ['order_id', 'pedido', 'id', 'order', 'rastreio', 'br2604465992725'],
+    'latitude': ['latitude', 'lat', 'lat_y', 'y', 'coordenada_y'],
+    'longitude': ['longitude', 'long', 'lng', 'lon', 'x', 'coordenada_x'],
+    'corridor_cage': ['corridor_cage', 'gaiola', 'cluster', 'corredor', 'cage'],
+    'driver_id': ['driver_id', 'id_motorista', 'cpf', 'motorista_id'],
+    'driver_name': ['driver_name', 'nome', 'motorista', 'nome_motorista'],
+    'license_plate': ['license_plate', 'placa', 'veiculo', 'placa_veiculo']
 }
 
-# --- 3. CARREGAMENTO COM NORMALIZAÇÃO ---
+# --- 3. CARREGAMENTO COM TRATAMENTO DE CHOQUE ---
 @st.cache_data(ttl=600)
 def carregar_bases_sql():
     try:
-        # Busca tudo das tabelas para podermos mapear
+        # Busca dados do banco
         spx_raw = pd.DataFrame(conn.table("base_spx").select("*").execute().data)
         cluster_raw = pd.DataFrame(conn.table("base_cluster").select("*").execute().data)
         fleet_raw = pd.DataFrame(conn.table("base_fleet").select("*").execute().data)
         
-        # Aplica o determinante (tradução)
-        df_spx = normalizar_colunas(spx_raw, SINONIMOS)
-        df_cluster = normalizar_colunas(cluster_raw, SINONIMOS)
-        df_fleet = normalizar_colunas(fleet_raw, SINONIMOS)
+        # Normaliza as 3 bases
+        df_spx = normalizar_dados(spx_raw, SINONIMOS)
+        df_cluster = normalizar_dados(cluster_raw, SINONIMOS)
+        df_fleet = normalizar_dados(fleet_raw, SINONIMOS)
         
-        return df_spx, df_cluster, df_fleet
+        # Converte coordenadas para números (essencial para o cálculo)
+        for df in [df_spx, df_cluster]:
+            if not df.empty:
+                if 'latitude' in df.columns:
+                    df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
+                    df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+        
+        return df_spx.dropna(subset=['order_id']) if not df_spx.empty else df_spx, df_cluster, df_fleet
     except Exception as e:
-        st.error(f"Erro ao carregar/mapear dados: {e}")
+        st.error(f"Erro ao carregar dados do Supabase: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 df_spx, df_cluster, df_fleet = carregar_bases_sql()
@@ -72,27 +84,32 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
 tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet"])
 
 with tab1:
-    id_busca = st.text_input("🔎 Bipar Pedido:").strip()
-    if id_busca and not df_spx.empty:
-        # Agora o código sempre encontrará 'order_id' graças ao normalizador!
-        pacote = df_spx[df_spx['order_id'].astype(str) == id_busca]
-        
-        if not pacote.empty:
-            lat, lon = pacote['latitude'].iloc[0], pacote['longitude'].iloc[0]
-            df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(lat, lon, x['latitude'], x['longitude']), axis=1)
-            sugestoes = df_cluster.sort_values('dist_km').head(3)
+    id_busca = st.text_input("🔎 Bipar Pedido (Order ID):").strip()
+    if id_busca:
+        if not df_spx.empty and 'order_id' in df_spx.columns:
+            pacote = df_spx[df_spx['order_id'].astype(str) == id_busca]
             
-            cols = st.columns(3)
-            for i, row in enumerate(sugestoes.itertuples()):
-                cols[i].metric(f"📍 {row.corridor_cage}", f"{row.dist_km:.2f} km")
+            if not pacote.empty:
+                lat, lon = pacote['latitude'].iloc[0], pacote['longitude'].iloc[0]
+                st.success(f"✅ Pedido Localizado!")
+                
+                # Calcula distância e sugere as 3 melhores gaiolas
+                df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(lat, lon, x['latitude'], x['longitude']), axis=1)
+                sugestoes = df_cluster.sort_values('dist_km').head(3)
+                
+                cols = st.columns(3)
+                for i, row in enumerate(sugestoes.itertuples()):
+                    cols[i].metric(f"📍 {row.corridor_cage}", f"{row.dist_km:.2f} km")
+            else:
+                st.warning(f"⚠️ Pedido {id_busca} não encontrado na base_spx.")
         else:
-            st.warning("Pedido não encontrado na base.")
+            st.error("❌ Erro: A coluna de ID não foi reconhecida ou a base está vazia.")
 
 with tab2:
-    d_id = st.text_input("🆔 Bipar Motorista:").strip()
+    d_id = st.text_input("🆔 Bipar Motorista (Driver ID):").strip()
     if d_id and not df_fleet.empty:
         motorista = df_fleet[df_fleet['driver_id'].astype(str) == d_id]
         if not motorista.empty:
             st.success(f"👤 {motorista['driver_name'].values[0]} | 🚛 {motorista['license_plate'].values[0]}")
         else:
-            st.error("Motorista não cadastrado.")
+            st.error("Motorista não cadastrado na base_fleet.")
