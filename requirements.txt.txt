@@ -1,6 +1,4 @@
 streamlit
 pandas
-st-supabase-connection
 numpy
 st-supabase-connection
-
