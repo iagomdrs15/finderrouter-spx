@@ -114,7 +114,6 @@ with tab_fleet:
 with tab_admin:
     st.header("🔄 Central de Atualização de Bases (CSV)")
     
-    # Configuração de mapeamento para as 3 bases principais
     config_bases = {
         "base_spx": {'order_id': ['order_id','pedido','ID'], 'latitude': ['latitude','lat'], 'longitude': ['longitude','lng']},
         "base_cluster": {'corridor_cage': ['corridor_cage','gaiola'], 'latitude': ['latitude','lat'], 'longitude': ['longitude','lng']},
@@ -124,19 +123,29 @@ with tab_admin:
     escolha = st.selectbox("Selecione a base para atualizar:", list(config_bases.keys()))
     arquivo = st.file_uploader(f"Subir novo CSV para {escolha}", type=["csv"])
     
-    if arquivo and st.button(f"🚀 Substituir dados em {escolha}"):
+    if arquivo:
         df_novo = pd.read_csv(arquivo)
-        df_mapeado = mapear_colunas(df_novo, config_bases[escolha])
+        # Mostra o que foi lido para ajudar o Milorde a identificar o erro
+        st.write("🔍 Colunas detectadas no seu CSV:", list(df_novo.columns))
         
-        # Garante apenas as colunas necessárias
-        colunas_finais = list(config_bases[escolha].keys())
-        df_final = df_mapeado[colunas_finais].dropna()
-        
-        try:
-            # Limpa e insere
-            conn.table(escolha).delete().neq("id", -1).execute()
-            conn.table(escolha).insert(df_final.to_dict(orient="records")).execute()
-            st.success(f"✅ {len(df_final)} registros atualizados! Limpe o cache para aplicar.")
-            st.cache_data.clear()
-        except Exception as e:
-            st.error(f"Erro: {e}")
+        if st.button(f"🚀 Substituir dados em {escolha}"):
+            df_mapeado = mapear_colunas(df_novo, config_bases[escolha])
+            colunas_finais = list(config_bases[escolha].keys())
+            
+            # VERIFICAÇÃO DE SEGURANÇA: Só prossegue se todas as colunas mapeadas existirem
+            colunas_faltantes = [c for c in colunas_finais if c not in df_mapeado.columns]
+            
+            if colunas_faltantes:
+                st.error(f"❌ Erro: Não encontramos as colunas (ou sinônimos) para: {colunas_faltantes}")
+                st.info("Ajuste o cabeçalho do seu CSV ou me avise o nome que está lá para eu adicionar ao 'tradutor'.")
+            else:
+                try:
+                    df_final = df_mapeado[colunas_finais].dropna()
+                    # Limpa e insere
+                    conn.table(escolha).delete().neq("id", -1).execute()
+                    conn.table(escolha).insert(df_final.to_dict(orient="records")).execute()
+                    st.success(f"✅ {len(df_final)} registros atualizados com sucesso!")
+                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"Erro técnico ao inserir no banco: {e}")
+
