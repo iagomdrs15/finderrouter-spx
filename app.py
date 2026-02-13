@@ -5,24 +5,15 @@ from datetime import datetime
 from st_supabase_connection import SupabaseConnection
 
 # --- 1. CONFIGURAÇÕES E CONEXÃO ---
-st.set_page_config(page_title="Alocador SPX Pro SQL", layout="wide", page_icon="🚀")
+st.set_page_config(page_title="Alocador SPX Pro", layout="wide", page_icon="🚀")
 
-# Conexão nativa que busca SUPABASE_URL e SUPABASE_KEY nos Secrets
+# Conexão direta via Secrets
 conn = st.connection("supabase", type=SupabaseConnection)
 
 HUB_LAT, HUB_LON = -8.791172513071563, -63.847713631142135
 hoje_str = datetime.now().strftime("%d/%m/%Y")
 
-# --- 2. FUNÇÕES DE APOIO E MAPEAMENTO ---
-def mapear_colunas(df, de_para):
-    """Traduz nomes de colunas do CSV para o padrão do SQL"""
-    for padrao, variacoes in de_para.items():
-        for var in variacoes:
-            if var in df.columns:
-                df = df.rename(columns={var: padrao})
-                break
-    return df
-
+# --- 2. FUNÇÕES ESSENCIAIS ---
 def calcular_distancia(lat1, lon1, lat2, lon2):
     try:
         if any(pd.isna([lat1, lon1, lat2, lon2])): return 9999
@@ -35,123 +26,81 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
 
 def style_sla(row):
     color = 'white'
-    text_color = 'black'
     try:
         tempo = row['tempo_hub']
-        if pd.notna(tempo) and tempo != "":
-            partes = list(map(int, tempo.split(':')))
+        if pd.notna(tempo) and ":" in str(tempo):
+            partes = list(map(int, str(tempo).split(':')))
             minutos = (partes[0] * 60 + partes[1]) if len(partes) >= 2 else 0
-            if minutos >= 15: color, text_color = '#ff4b4b', 'white'
-            elif minutos >= 11: color, text_color = '#f9d71c', 'black'
-            else: color, text_color = '#28a745', 'white'
+            if minutos >= 15: color = '#ff4b4b'
+            elif minutos >= 11: color = '#f9d71c'
+            else: color = '#28a745'
     except: pass
-    return [f'background-color: {color}; color: {text_color}' if name == 'tempo_hub' else '' for name in row.index]
+    return [f'background-color: {color}' if name == 'tempo_hub' else '' for name in row.index]
 
-# --- 3. CARREGAMENTO SEM CACHE (PARA TESTE) ---
-def carregar_bases_sql():
-    try:
-        # Tenta buscar apenas 1 linha para testar a pulsação do banco
-        teste = conn.table("base_cluster").select("*").limit(1).execute()
-        if teste.data:
-            st.success("✅ Pulsação detectada! O banco respondeu.")
-        else:
-            st.warning("⚠️ Banco conectado, mas a tabela 'base_cluster' parece vazia.")
-            
-        spx = conn.table("base_spx").select("*").execute()
-        cluster = conn.table("base_cluster").select("*").execute()
-        fleet = conn.table("base_fleet").select("*").execute()
-        return pd.DataFrame(spx.data), pd.DataFrame(cluster.data), pd.DataFrame(fleet.data)
-    except Exception as e:
-        st.error(f"🚨 ERRO DE CONEXÃO: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+# --- 3. CARREGAMENTO DE DADOS (SEM COMPLEXIDADE) ---
+@st.cache_data(ttl=60) # Cache curto de 1 minuto para facilitar testes
+def carregar_tudo():
+    # Buscando dados das tabelas
+    spx = conn.table("base_spx").select("*").execute()
+    cluster = conn.table("base_cluster").select("*").execute()
+    fleet = conn.table("base_fleet").select("*").execute()
+    return pd.DataFrame(spx.data), pd.DataFrame(cluster.data), pd.DataFrame(fleet.data)
 
-# --- 4. INTERFACE PRINCIPAL ---
-tab_aloc, tab_fleet, tab_admin = st.tabs(["🎯 Alocador", "🚚 Fleet", "⚙️ Admin Bases"])
+df_spx, df_cluster, df_fleet_base = carregar_tudo()
 
-# --- ABA ALOCADOR ---
-with tab_aloc:
-    col_id, col_obs = st.columns(2)
-    id_busca = col_id.text_input("🔎 Order ID / Cluster:").strip()
-    
-    if id_busca and not df_spx.empty:
-        pacote = df_spx[df_spx['order_id'].astype(str) == id_busca]
-        ref_lat = pacote['latitude'].iloc[0] if not pacote.empty else HUB_LAT
-        ref_lon = pacote['longitude'].iloc[0] if not pacote.empty else HUB_LON
+# --- 4. INTERFACE ---
+tab1, tab2 = st.tabs(["🎯 Alocador de Pacotes", "🚚 Gestão de Fleet"])
 
-        df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(ref_lat, ref_lon, x['latitude'], x['longitude']), axis=1)
-        sugestoes = df_cluster.sort_values('dist_km').drop_duplicates('corridor_cage').head(3)
-
-        c1, c2 = st.columns([1, 1.2])
-        with c1:
-            for i, row in sugestoes.iterrows():
-                st.info(f"📍 {row['corridor_cage']} ({row['dist_km']:.2f}km)")
-        with c2:
-            st.map(pd.DataFrame({'lat': [ref_lat], 'lon': [ref_lon]}), zoom=14)
-
-# --- ABA FLEET ---
-with tab_fleet:
-    @st.fragment
-    def sessao_fleet():
-        c_in, c_list = st.columns([1, 2])
-        with c_in:
-            d_id = st.text_input("🆔 Bipar Driver ID:", key="scan_sql").strip()
-            if d_id and not df_fleet_base.empty:
-                match = df_fleet_base[df_fleet_base['driver_id'].astype(str) == d_id]
-                if not match.empty:
-                    nome, placa = match['driver_name'].values[0], str(match['license_plate'].values[0])
-                    res = conn.table("log_fleet").select("*").eq("driver_id", d_id).is_("saida", "null").execute()
-                    
-                    if res.data: # Saída
-                        row_id = res.data[0]['id']
-                        delta = datetime.now().astimezone() - datetime.fromisoformat(res.data[0]['entrada'].replace('Z', '+00:00'))
-                        conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "tempo_hub": str(delta).split('.')[0]}).eq("id", row_id).execute()
-                        st.success(f"🏁 Saída: {nome}")
-                    else: # Entrada
-                        conn.table("log_fleet").insert({"driver_id": d_id, "nome": nome, "placa": placa, "data": hoje_str}).execute()
-                        st.info(f"📥 Entrada: {nome}")
-        with c_list:
-            logs = conn.table("log_fleet").select("*").eq("data", hoje_str).order("entrada", desc=True).execute()
-            if logs.data:
-                st.dataframe(pd.DataFrame(logs.data)[['nome', 'placa', 'entrada', 'tempo_hub']].style.apply(style_sla, axis=1), use_container_width=True)
-    sessao_fleet()
-
-# --- ABA ADMIN: ATUALIZAÇÃO AUTOMÁTICA ---
-with tab_admin:
-    st.header("🔄 Central de Atualização de Bases (CSV)")
-    
-    config_bases = {
-        "base_spx": {'order_id': ['order_id','pedido','ID'], 'latitude': ['latitude','lat'], 'longitude': ['longitude','lng']},
-        "base_cluster": {'corridor_cage': ['corridor_cage','gaiola'], 'latitude': ['latitude','lat'], 'longitude': ['longitude','lng']},
-        "base_fleet": {'driver_id': ['driver_id','id'], 'driver_name': ['driver_name','nome'], 'license_plate': ['license_plate','placa']}
-    }
-    
-    escolha = st.selectbox("Selecione a base para atualizar:", list(config_bases.keys()))
-    arquivo = st.file_uploader(f"Subir novo CSV para {escolha}", type=["csv"])
-    
-    if arquivo:
-        df_novo = pd.read_csv(arquivo)
-        # Mostra o que foi lido para ajudar o Milorde a identificar o erro
-        st.write("🔍 Colunas detectadas no seu CSV:", list(df_novo.columns))
+with tab1:
+    id_busca = st.text_input("🔎 Digite o Order ID:").strip()
+    if id_busca:
+        # Busca o pacote na base SPX
+        pacote = df_spx[df_spx['order_id'].astype(str) == id_busca] if not df_spx.empty else pd.DataFrame()
         
-        if st.button(f"🚀 Substituir dados em {escolha}"):
-            df_mapeado = mapear_colunas(df_novo, config_bases[escolha])
-            colunas_finais = list(config_bases[escolha].keys())
+        if not pacote.empty:
+            ref_lat, ref_lon = pacote['latitude'].iloc[0], pacote['longitude'].iloc[0]
+            st.success(f"✅ Pacote encontrado! Destino: {ref_lat}, {ref_lon}")
             
-            # VERIFICAÇÃO DE SEGURANÇA: Só prossegue se todas as colunas mapeadas existirem
-            colunas_faltantes = [c for c in colunas_finais if c not in df_mapeado.columns]
+            # Calcula sugestões na base_cluster
+            df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(ref_lat, ref_lon, x['latitude'], x['longitude']), axis=1)
+            sugestoes = df_cluster.sort_values('dist_km').head(3)
             
-            if colunas_faltantes:
-                st.error(f"❌ Erro: Não encontramos as colunas (ou sinônimos) para: {colunas_faltantes}")
-                st.info("Ajuste o cabeçalho do seu CSV ou me avise o nome que está lá para eu adicionar ao 'tradutor'.")
-            else:
-                try:
-                    df_final = df_mapeado[colunas_finais].dropna()
-                    # Limpa e insere
-                    conn.table(escolha).delete().neq("id", -1).execute()
-                    conn.table(escolha).insert(df_final.to_dict(orient="records")).execute()
-                    st.success(f"✅ {len(df_final)} registros atualizados com sucesso!")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Erro técnico ao inserir no banco: {e}")
+            cols = st.columns(3)
+            for idx, row in enumerate(sugestoes.itertuples()):
+                cols[idx].metric(f"📍 {row.corridor_cage}", f"{row.dist_km:.2f} km")
+        else:
+            st.warning("⚠️ Pacote não encontrado na base_spx.")
 
+with tab2:
+    st.subheader("Bip de Entrada/Saída")
+    d_id = st.text_input("🆔 Scan Driver ID:").strip()
+    
+    if d_id and not df_fleet_base.empty:
+        # Localiza o motorista na base_fleet
+        motorista = df_fleet_base[df_fleet_base['driver_id'].astype(str) == d_id]
+        
+        if not motorista.empty:
+            nome = motorista['driver_name'].values[0]
+            placa = motorista['license_plate'].values[0]
+            
+            # Verifica se já está no HUB (sem hora de saída)
+            aberto = conn.table("log_fleet").select("*").eq("driver_id", d_id).is_("saida", "null").execute()
+            
+            if aberto.data: # Registrar Saída
+                row_id = aberto.data[0]['id']
+                entrada_dt = datetime.fromisoformat(aberto.data[0]['entrada'].replace('Z', '+00:00'))
+                delta = datetime.now().astimezone() - entrada_dt
+                tempo = str(delta).split('.')[0]
+                conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "tempo_hub": tempo}).eq("id", row_id).execute()
+                st.toast(f"🚩 Saída: {nome}")
+            else: # Registrar Entrada
+                conn.table("log_fleet").insert({"driver_id": d_id, "nome": nome, "placa": placa, "data": hoje_str}).execute()
+                st.toast(f"📥 Entrada: {nome}")
+        else:
+            st.error("❌ Motorista não cadastrado na base_fleet.")
 
+    # Exibe os logs do dia
+    st.divider()
+    logs = conn.table("log_fleet").select("*").eq("data", hoje_str).order("entrada", desc=True).execute()
+    if logs.data:
+        st.dataframe(pd.DataFrame(logs.data)[['nome', 'placa', 'entrada', 'tempo_hub']].style.apply(style_sla, axis=1), use_container_width=True)
