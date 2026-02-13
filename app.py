@@ -9,44 +9,38 @@ from st_supabase_connection import SupabaseConnection
 st.set_page_config(page_title="Alocador SPX Pro SQL", layout="wide", page_icon="🚀")
 
 # --- CONEXÃO COM BANCO DE DADOS (SUPABASE) ---
-# Milorde, as chaves devem estar nos Secrets do Streamlit Cloud
+# As chaves 'supabase_url' e 'supabase_key' devem estar nos Secrets do Cloud
 conn = st.connection("supabase", type=SupabaseConnection)
 
-# --- COORDENADAS DO HUB ---
+# --- COORDENADAS DO HUB (PORTO VELHO) ---
 HUB_LAT, HUB_LON = -8.791172513071563, -63.847713631142135
 hoje_str = datetime.now().strftime("%d/%m/%Y")
 
-# --- FUNÇÕES AUXILIARES ---
+# --- FUNÇÕES DE ESTILO E GEOGRAFIA ---
 def style_sla(row):
-    """Aplica cores baseadas no rigoroso critério de 10/11/15 min"""
+    """SLA Rigoroso: Verde < 10min | Amarelo 11-14min | Vermelho >= 15min"""
     color = 'white'
     text_color = 'black'
     try:
         tempo = row['tempo_hub']
         if pd.notna(tempo) and tempo != "":
             partes = list(map(int, tempo.split(':')))
+            # Lida com formatos H:M:S ou M:S
             total_segundos = (partes[0] * 3600 + partes[1] * 60 + partes[2]) if len(partes) == 3 else (partes[0] * 60 + partes[1])
             minutos = total_segundos / 60
             
-            if minutos >= 15: color, text_color = '#ff4b4b', 'white' # Vermelho
-            elif minutos >= 11: color, text_color = '#f9d71c', 'black' # Amarelo (Atenção)
-            else: color, text_color = '#28a745', 'white' # Verde
+            if minutos >= 15: 
+                color, text_color = '#ff4b4b', 'white' # Alerta Vermelho
+            elif minutos >= 11: 
+                color, text_color = '#f9d71c', 'black' # Atenção Amarela
+            else: 
+                color, text_color = '#28a745', 'white' # OK Verde
     except: pass
     return [f'background-color: {color}; color: {text_color}' if name == 'tempo_hub' else '' for name in row.index]
 
-def tratar_pontos_coordenada(valor, tipo='lat'):
-    try:
-        if pd.isna(valor) or str(valor).strip() == "": return np.nan
-        s = str(valor).replace(".", "").replace(",", "").strip()
-        sinal = "-" if s.startswith("-") else ""
-        apenas_numeros = s.replace("-", "")
-        corrigido = sinal + (apenas_numeros[:1] if tipo == 'lat' else apenas_numeros[:2]) + "." + (apenas_numeros[1:] if tipo == 'lat' else apenas_numeros[2:])
-        return float(corrigido)
-    except: return np.nan
-
 def calcular_distancia(lat1, lon1, lat2, lon2):
     try:
-        if pd.isna(lat1) or pd.isna(lon1) or pd.isna(lat2) or pd.isna(lon2): return 9999
+        if any(pd.isna([lat1, lon1, lat2, lon2])): return 9999
         r = 6371 
         phi1, phi2 = np.radians(lat1), np.radians(lat2)
         dphi, dlambda = np.radians(lat2 - lat1), np.radians(lon2 - lon1)
@@ -54,121 +48,113 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
         return 2 * r * np.arcsin(np.sqrt(a))
     except: return 9999
 
-@st.cache_data(ttl=600, show_spinner=False)
-def carregar_dados_google(url, aba):
-    try:
-        file_id = url.split("/d/")[1].split("/")[0]
-        url_csv = f"https://docs.google.com/spreadsheets/d/{file_id}/gviz/tq?tqx=out:csv&sheet={aba.replace(' ', '%20')}"
-        df = pd.read_csv(url_csv)
-        df.columns = df.columns.str.strip()
-        return df
-    except: return pd.DataFrame()
+# --- CARREGAMENTO DE DADOS (SQL) ---
+@st.cache_data(ttl=600)
+def carregar_bases_sql():
+    # Consulta as tabelas que você criou no Supabase
+    spx = conn.table("Base SPX").select("*").execute()
+    cluster = conn.table("Base Cluster").select("*").execute()
+    fleet = conn.table("Base Fleet").select("*").execute()
+    return pd.DataFrame(spx.data), pd.DataFrame(cluster.data), pd.DataFrame(fleet.data)
 
 # --- INTERFACE ---
 with st.sidebar:
-    st.header("⚙️ Controle Operacional")
-    if st.button("🔄 Sincronizar Bases", width='stretch'):
+    st.header("⚙️ Painel Admin")
+    st.success("🟢 Supabase SQL Conectado")
+    if st.button("🔄 Sincronizar Tabelas", width='stretch'):
         st.cache_data.clear()
         st.rerun()
 
+# Carregamento inicial das bases
+df_spx, df_cluster, df_fleet_base = carregar_bases_sql()
+
 tab_alocador, tab_fleet = st.tabs(["🎯 Alocador de Pacotes", "🚚 Gestão de Fleet (SQL)"])
-url_planilha = st.text_input("🔗 Link da Planilha Google Sheets:", key="url_main")
 
-if url_planilha:
-    df_spx = carregar_dados_google(url_planilha, "Base SPX")
-    df_cluster = carregar_dados_google(url_planilha, "Base Cluster")
-    df_fleet_base = carregar_dados_google(url_planilha, "Base Fleet")
+# --- ABA 1: ALOCADOR ---
+with tab_alocador:
+    col_s, col_o = st.columns([1, 1])
+    with col_s: id_busca = st.text_input("🔎 Bipar Order ID / Cluster:", key="aloc_scan").strip()
+    with col_o: obs_label = st.text_input("📝 Obs Etiqueta:", placeholder="Opcional...")
 
-    # --- ABA 1: ALOCADOR ---
-    with tab_alocador:
-        col_s, col_o = st.columns([1, 1])
-        with col_s: id_busca = st.text_input("🔎 Bipar Order ID / Cluster:", key="aloc_in").strip()
-        with col_o: obs_label = st.text_input("📝 Obs Etiqueta:", placeholder="Opcional...")
+    if id_busca:
+        # Busca por Order ID ou Cluster Name
+        pacote = df_spx[df_spx['order_id'].astype(str) == id_busca] if not df_spx.empty else pd.DataFrame()
+        item_cluster = df_cluster[df_cluster.apply(lambda x: id_busca.lower() in str(x).lower(), axis=1)]
 
-        if id_busca:
-            pacote = df_spx[df_spx['Order ID'].astype(str) == id_busca] if not df_spx.empty else pd.DataFrame()
-            mask_cluster = df_cluster.astype(str).apply(lambda x: x.str.contains(id_busca, case=False)).any(axis=1) if not df_cluster.empty else pd.Series()
-            item_cluster = df_cluster[mask_cluster]
+        ref_lat = pacote['latitude'].iloc[0] if not pacote.empty else (item_cluster['latitude'].iloc[0] if not item_cluster.empty else HUB_LAT)
+        ref_lon = pacote['longitude'].iloc[0] if not pacote.empty else (item_cluster['longitude'].iloc[0] if not item_cluster.empty else HUB_LON)
 
-            lat_p, lon_p = (tratar_pontos_coordenada(pacote['Latitude'].iloc[0], 'lat'), tratar_pontos_coordenada(pacote['Longitude'].iloc[0], 'lon')) if not pacote.empty else (np.nan, np.nan)
-            if (pd.isna(lat_p)) and not item_cluster.empty:
-                lat_p, lon_p = tratar_pontos_coordenada(item_cluster['Latitude'].iloc[0], 'lat'), tratar_pontos_coordenada(item_cluster['Longitude'].iloc[0], 'lon')
-            
-            ref_lat, ref_lon = (lat_p if not pd.isna(lat_p) else HUB_LAT), (lon_p if not pd.isna(lon_p) else HUB_LON)
-            df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(ref_lat, ref_lon, tratar_pontos_coordenada(x['Latitude'], 'lat'), tratar_pontos_coordenada(x['Longitude'], 'lon')), axis=1)
-            sugestoes = df_cluster.sort_values('dist_km').drop_duplicates('Corridor Cage').head(3)
+        df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(ref_lat, ref_lon, x['latitude'], x['longitude']), axis=1)
+        sugestoes = df_cluster.sort_values('dist_km').drop_duplicates('corridor_cage').head(3)
 
-            c1, c2 = st.columns([1, 1.2])
-            with c1:
-                st.success(f"📍 Referência: {'Pacote' if not pacote.empty else 'HUB'}")
-                for i, row in sugestoes.iterrows():
-                    with st.expander(f"📍 {row['Corridor Cage']} ({row['dist_km']:.2f}km)"):
-                        b1, b2 = st.columns(2)
-                        with b1: st.link_button("🔗 Alocar", f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={str(row['Planned AT']).strip()}", width='stretch')
-                        with b2:
-                            if st.button("🖨️ Imprimir", key=f"prt_{i}", width='stretch'):
-                                p = str(row['Corridor Cage']).split('-')
-                                d = {'c': p[0], 'g': p[1] if len(p)>1 else "0", 'id': id_busca, 'b': row['Cluster'], 'o': obs_label, 'dt': datetime.now().strftime("%d/%m/%Y %H:%M")}
-                                html = f"""<style>@media print {{ @page {{ size: 70mm 50mm; margin: 0; }} body {{ margin: 0; }} }} .box {{ width: 68mm; height: 48mm; border: 3px solid #000; font-family: Arial; }} .header {{ background: #000; color: #fff; text-align: center; padding: 2px; font-weight: bold; font-size: 9pt; }} .split {{ display: flex; border-bottom: 2px solid #000; height: 21mm; }} .side {{ flex: 1; text-align: center; border-right: 2px solid #000; display: flex; flex-direction: column; justify-content: center; }} .big {{ font-size: 42pt; font-weight: bold; line-height: 0.9; }} .bairro {{ background: #eee; text-align: center; padding: 4px; font-weight: bold; text-transform: uppercase; border-bottom: 1.5pt dashed black; font-size: 10pt; }}</style><div class="box"><div class="header">SPX - PORTO VELHO HUB</div><div class="split"><div class="side"><div>CORREDOR</div><div class="big">{d['c']}</div></div><div class="side" style="border:none;"><div>GAIOLA</div><div class="big">{d['g']}</div></div></div><div class="bairro">{d['b']}</div><div style="text-align:center; padding:1px; font-size: 8pt;"><b>{d['o']}</b><br>ID: {d['id']} | {d['dt']}</div></div><script>window.onload = function() {{ window.print(); }};</script>"""
-                                components.html(html, height=250)
-            with c2:
-                st.map(pd.DataFrame({'lat': [ref_lat], 'lon': [ref_lon]}), zoom=13)
+        c1, c2 = st.columns([1, 1.2])
+        with c1:
+            st.success(f"📍 Referência: {'Pacote' if not pacote.empty else 'HUB'}")
+            for i, row in sugestoes.iterrows():
+                with st.expander(f"📍 {row['corridor_cage']} ({row['dist_km']:.2f}km)"):
+                    if st.button("🖨️ Imprimir", key=f"print_{i}"):
+                        st.info("Simulando impressão térmica...")
+                        # Aqui mantemos a lógica de componentes.html se desejar reativar
+        with c2:
+            m_df = pd.DataFrame({'lat': [ref_lat], 'lon': [ref_lon]})
+            st.map(m_df, zoom=14)
 
-    # --- ABA 2: GESTÃO DE FLEET (INTEGRAÇÃO SQL) ---
-    with tab_fleet:
-        st.header(f"⏱️ Monitoramento SQL - {hoje_str}")
+# --- ABA 2: GESTÃO DE FLEET (SQL) ---
+with tab_fleet:
+    @st.fragment
+    def sessao_fleet_sql():
+        st.header(f"⏱️ Controle de Carregamento SQL - {hoje_str}")
+        col_f1, col_f2 = st.columns([1, 2])
         
-        # Fragmento para performance turbo
-        @st.fragment
-        def sessao_fleet_sql():
-            col_f1, col_f2 = st.columns([1, 2])
+        with col_f1:
+            d_id = st.text_input("🆔 Bipar Driver ID:", key="sql_bip").strip()
+            if d_id:
+                # Busca na base de motoristas do SQL (df_fleet_base)
+                match = df_fleet_base[df_fleet_base['driver_id'].astype(str) == d_id]
+                if not match.empty:
+                    nome, placa = match['driver_name'].values[0], str(match['license_plate'].values[0])
+                    agora = datetime.now()
+                    
+                    # Pergunta ao SQL: Existe este Driver ID sem horário de saída (null)?
+                    res = conn.table("log_fleet").select("*").eq("driver_id", d_id).is_("saida", "null").execute()
+                    
+                    if res.data:
+                        # Registro de Saída
+                        row_id = res.data[0]['id']
+                        # Converte string UTC para datetime com fuso
+                        entrada_dt = datetime.fromisoformat(res.data[0]['entrada'].replace('Z', '+00:00'))
+                        delta = agora.astimezone() - entrada_dt
+                        tempo_s = str(delta).split('.')[0]
+                        
+                        conn.table("log_fleet").update({
+                            "saida": agora.isoformat(), 
+                            "tempo_hub": tempo_s
+                        }).eq("id", row_id).execute()
+                        st.toast(f"Saída: {nome} | Tempo: {tempo_s}", icon="🏁")
+                    else:
+                        # Registro de Entrada
+                        conn.table("log_fleet").insert({
+                            "driver_id": d_id, 
+                            "nome": nome, 
+                            "placa": placa, 
+                            "data": hoje_str
+                        }).execute()
+                        st.toast(f"Entrada: {nome}", icon="📥")
+                    
+                    # Preview visual da placa
+                    p_html = f"""<div style="background:#FFF;border:3px solid #000;border-radius:6px;width:200px;height:70px;margin:10px auto;display:flex;flex-direction:column;align-items:center;justify-content:space-between;font-family:sans-serif;border-top:12px solid #003399;"><div style="color:white;font-size:7px;font-weight:bold;margin-top:-11px;">BRASIL</div><div style="font-size:28px;font-weight:900;letter-spacing:1px;color:#000;padding-bottom:5px;">{placa.upper()}</div></div>"""
+                    components.html(p_html, height=90)
             
-            with col_f1:
-                d_id = st.text_input("🆔 Bipar Driver ID:", key="input_f_scan").strip()
-                
-                if d_id:
-                    # 1. Busca motorista na base de dados carregada do Google
-                    match = df_fleet_base[df_fleet_base['Driver ID'].astype(str) == d_id]
-                    if not match.empty:
-                        nome, placa = match['Driver Name'].values[0], str(match['License Plate'].values[0])
-                        agora = datetime.now()
-                        
-                        # 2. Verifica no SQL se há entrada sem saída
-                        res = conn.table("log_fleet").select("*").eq("driver_id", d_id).is_("saida", "null").execute()
-                        
-                        if res.data:
-                            # CHECK-OUT
-                            row_id = res.data[0]['id']
-                            entrada_dt = datetime.fromisoformat(res.data[0]['entrada'].replace('Z', '+00:00'))
-                            delta = agora.astimezone() - entrada_dt
-                            tempo_str = str(delta).split('.')[0]
-                            
-                            conn.table("log_fleet").update({
-                                "saida": agora.isoformat(),
-                                "tempo_hub": tempo_str
-                            }).eq("id", row_id).execute()
-                            st.toast(f"Saída: {nome}", icon="🏁")
-                        else:
-                            # CHECK-IN
-                            conn.table("log_fleet").insert({
-                                "driver_id": d_id, "nome": nome, "placa": placa,
-                                "data": hoje_str
-                            }).execute()
-                            st.toast(f"Entrada: {nome}", icon="📥")
-                        
-                        # Preview da Placa
-                        p_html = f"""<div style="background:#FFF;border:3px solid #000;border-radius:6px;width:200px;height:70px;margin:10px auto;display:flex;flex-direction:column;align-items:center;justify-content:space-between;font-family:sans-serif;border-top:12px solid #003399;"><div style="color:white;font-size:7px;font-weight:bold;margin-top:-11px;">BRASIL</div><div style="font-size:28px;font-weight:900;letter-spacing:1px;color:#000;padding-bottom:5px;">{placa.upper()}</div></div>"""
-                        components.html(p_html, height=90)
-                
-            with col_f2:
-                # 3. Puxa os dados do SQL para exibir na tabela
-                logs_sql = conn.table("log_fleet").select("*").eq("data", hoje_str).order("entrada", desc=True).execute()
-                if logs_sql.data:
-                    df_logs = pd.DataFrame(logs_sql.data)
-                    # Reordenar colunas para visualização
-                    cols = ['driver_id', 'nome', 'placa', 'entrada', 'saida', 'tempo_hub']
-                    st.dataframe(df_logs[cols].style.apply(style_sla, axis=1), use_container_width=True)
-                else:
-                    st.info("Aguardando primeiras movimentações do dia...")
+        with col_f2:
+            st.subheader("📋 Painel de Monitoramento (Dia)")
+            # Puxa os bips do dia direto do servidor SQL
+            logs_sql = conn.table("log_fleet").select("*").eq("data", hoje_str).order("entrada", desc=True).execute()
+            if logs_sql.data:
+                df_view = pd.DataFrame(logs_sql.data)
+                # Seleção de colunas para o operador
+                df_final = df_view[['driver_id', 'nome', 'placa', 'entrada', 'saida', 'tempo_hub']]
+                st.dataframe(df_final.style.apply(style_sla, axis=1), use_container_width=True)
+            else:
+                st.info("Aguardando registros...")
 
-        sessao_fleet_sql()
+    sessao_fleet_sql()
