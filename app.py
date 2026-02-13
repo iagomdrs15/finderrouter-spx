@@ -44,9 +44,9 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
 @st.cache_data(ttl=600)
 def carregar_bases_sql():
     # Carrega as tabelas que o senhor subiu para o Supabase
-    spx = conn.table("Base SPX").select("*").execute()
-    cluster = conn.table("Base Cluster").select("*").execute()
-    fleet = conn.table("Base Fleet").select("*").execute()
+    spx = conn.table("base_spx").select("*").execute()
+    cluster = conn.table("base_cluster").select("*").execute()
+    fleet = conn.table("base_fleet").select("*").execute()
     return pd.DataFrame(spx.data), pd.DataFrame(cluster.data), pd.DataFrame(fleet.data)
 
 # --- 4. INTERFACE PRINCIPAL ---
@@ -108,3 +108,4 @@ with tab_fleet:
                 st.dataframe(pd.DataFrame(logs.data)[['nome', 'placa', 'entrada', 'tempo_hub']].style.apply(style_sla, axis=1), use_container_width=True)
 
     sessao_fleet()
+
