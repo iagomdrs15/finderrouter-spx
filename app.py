@@ -154,3 +154,4 @@ with tab2:
     logs = conn.table("log_fleet").select("*").eq("data", hoje_str).order("entrada", desc=True).execute()
     if logs.data:
         st.dataframe(pd.DataFrame(logs.data)[['nome', 'placa', 'entrada', 'tempo_hub']].style.apply(style_sla, axis=1), use_container_width=True)
+
