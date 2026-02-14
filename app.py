@@ -23,7 +23,6 @@ def normalizar_dados(df, mapa_sinonimos):
                 break
     return df
 
-# ADICIONADO 'spx_tn' AOS SINÔNIMOS PARA INTEGRAÇÃO TOTAL
 SINONIMOS = {
     'order_id': ['order_id', 'pedido', 'spx_tn', 'rastreio', 'id'],
     'latitude': ['latitude', 'lat', 'y'],
@@ -32,10 +31,11 @@ SINONIMOS = {
     'driver_id': ['driver_id', 'id_motorista', 'cpf'],
     'driver_name': ['driver_name', 'nome', 'motorista'],
     'license_plate': ['license_plate', 'placa'],
-    'planned_at': ['planned_at', 'id_planejamento', 'task_id']
+    'planned_at': ['planned_at', 'id_planejamento', 'task_id', 'id_tarefa']
 }
 
 # --- 3. CARREGAMENTO COM CORREÇÃO ---
+@st.cache_data(ttl=60)
 def carregar_bases_sql():
     try:
         spx = pd.DataFrame(conn.table("base_spx").select("*").execute().data)
@@ -75,7 +75,6 @@ tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 with tab1:
     id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_v4").strip()
     if id_busca:
-        # Busca prioritária no SPX, depois no Cluster via SPX_TN
         aloc_alvo = pd.DataFrame()
         if not df_spx.empty and id_busca in df_spx['order_id'].astype(str).values:
             aloc_alvo = df_spx[df_spx['order_id'].astype(str) == id_busca]
@@ -87,8 +86,6 @@ with tab1:
         if not aloc_alvo.empty:
             p_lat, p_lon = aloc_alvo['latitude'].iloc[0], aloc_alvo['longitude'].iloc[0]
             df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(p_lat, p_lon, x['latitude'], x['longitude']), axis=1)
-            
-            # Filtra duplicatas para mostrar apenas opções únicas de Gaiola
             sugestoes = df_cluster.sort_values('dist_km').drop_duplicates(subset=['corridor_cage']).head(3)
             
             st.write("### 📍 Destinos Sugeridos")
@@ -103,15 +100,20 @@ with tab1:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    link_spx = f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={getattr(row, 'planned_at', '')}"
-                    st.link_button("📥 Alocar na Shopee", link_spx, use_container_width=True)
+                    # INTEGRAÇÃO DO LINK DINÂMICO
+                    planned_id = str(getattr(row, 'planned_at', '')).strip()
+                    if planned_id and planned_id != 'nan' and planned_id != '':
+                        link_spx = f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={planned_id}"
+                        st.link_button("📥 Alocar na Shopee", link_spx, use_container_width=True)
+                    else:
+                        st.button("⚠️ ID Indisponível", use_container_width=True, disabled=True, help="Campo planned_at vazio no banco.")
+
                     if st.button(f"🖨️ Imprimir {row.corridor_cage}", key=f"p_v4_{i}", use_container_width=True):
                         st.toast(f"Imprimindo etiqueta {row.corridor_cage}")
         else:
-            st.error("❌ Pedido não encontrado. Verifique se o código spx_tn existe no banco.")
+            st.error("❌ Pedido não encontrado nas bases.")
 
 with tab2:
-    # (Mantido o código do Fleet com a trava de last_bip para evitar o loop)
     st.write("### 📥 Fleet Control")
     d_id = st.text_input("🆔 Bipar Driver ID:", key="fleet_v4").strip()
     if d_id and st.session_state.get('last_bip') != d_id:
@@ -119,7 +121,6 @@ with tab2:
         if not match.empty:
             nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
             st.markdown(f"<h2>{placa} - {nome}</h2>", unsafe_allow_html=True)
-            # Lógica de entrada/saída no banco...
             st.session_state.last_bip = d_id
             st.rerun()
     elif not d_id:
