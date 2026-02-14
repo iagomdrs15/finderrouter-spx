@@ -3,3 +3,4 @@ pandas
 numpy
 datetime
 st-supabase-connection
+st-autorefresh
