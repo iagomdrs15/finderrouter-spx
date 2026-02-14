@@ -5,15 +5,19 @@ from datetime import datetime
 import time
 from st_supabase_connection import SupabaseConnection
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 
 # --- 1. CONFIGURAÇÕES E CONEXÃO ---
 st.set_page_config(page_title="Alocador SPX Pro SQL", layout="wide", page_icon="🚀")
 conn = st.connection("supabase", type=SupabaseConnection)
 
+# Atualização automática a cada 1 segundo para o Ops Clock e Cronômetros
+st_autorefresh(interval=1000, key="ops_pulse")
+
 HUB_LAT, HUB_LON = -8.791172513071563, -63.847713631142135
 hoje_str = datetime.now().strftime("%d/%m/%Y")
 
-# --- 2. TRADUTOR DE COLUNAS (O DETERMINANTE) ---
+# --- 2. TRADUTOR DE COLUNAS ---
 def normalizar_dados(df, mapa_sinonimos):
     if df is None or df.empty: return pd.DataFrame()
     df.columns = [str(c).lower().strip().replace(" ", "_") for c in df.columns]
@@ -83,6 +87,7 @@ st.markdown("""
 
 c_clock, c_clock_btn = st.columns([3, 1])
 tempo_exibicao = "00:00:00"
+
 if st.session_state.ops_clock_running and st.session_state.ops_start_time:
     decorrido = datetime.now() - st.session_state.ops_start_time
     h, r = divmod(decorrido.total_seconds(), 3600)
@@ -93,13 +98,17 @@ with c_clock:
     st.markdown(f'<div class="ops-clock-container"><span style="color:gray; font-size:10px;">HUB OPERATIONS CLOCK</span><br><span class="ops-time">{tempo_exibicao}</span></div>', unsafe_allow_html=True)
 with c_clock_btn:
     if st.session_state.ops_clock_running:
-        if st.button("🛑 PARAR OPS", use_container_width=True):
+        if st.button("🛑 PARAR OPS", use_container_width=True, type="primary"):
             st.session_state.ops_clock_running = False
             st.session_state.ops_start_time = None
             st.rerun()
-    else: st.info("Clock Inativo")
+    else:
+        if st.button("🚀 INICIAR CLOCK", use_container_width=True):
+            st.session_state.ops_clock_running = True
+            st.session_state.ops_start_time = datetime.now()
+            st.rerun()
 
-# --- 5. INTERFACE PRINCIPAL ---
+# --- 5. INTERFACE ---
 tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 
 with tab1:
@@ -135,7 +144,7 @@ with tab1:
                 corredor, gaiola = p[0], p[1] if len(p) > 1 else "0"
                 html_label = f"""
                 <div style="width:330px; height:230px; border:4px solid #000; font-family:Arial; background:white; margin:auto;">
-                    <div style="background:#000; color:#fff; text-align:center; padding:5px; font-weight:bold;">SPX - PORTO VELHO HUB</div>
+                    <div style="background:#000; color:#fff; text-align:center; padding:5px; font-weight:bold; font-size:14px;">SPX - PORTO VELHO HUB</div>
                     <div style="display:flex; border-bottom:3px solid #000; height:110px;">
                         <div style="flex:1; text-align:center; border-right:3px solid #000; display:flex; flex-direction:column; justify-content:center;"><div>CORREDOR</div><div style="font-size:65px; font-weight:bold; color:black;">{corredor}</div></div>
                         <div style="flex:1; text-align:center; display:flex; flex-direction:column; justify-content:center;"><div>GAIOLA</div><div style="font-size:65px; font-weight:bold; color:black;">{gaiola}</div></div>
@@ -145,12 +154,12 @@ with tab1:
                 </div>"""
                 st.markdown(html_label, unsafe_allow_html=True)
                 if st.button("🖨️ CONFIRMAR IMPRESSÃO", use_container_width=True, type="primary"):
-                    components.html(html_label + "<script>window.print();</script>", height=0)
-                    st.toast("Enviado!", icon="✅")
-        else: st.error("❌ Não encontrado.")
+                    components.html(html_label + "<script>window.onload = function() { window.print(); };</script>", height=0)
+                    st.toast("Enviado para impressão!", icon="✅")
+        else: st.error("❌ Pedido não localizado.")
 
 with tab2:
-    st.write("### 🚚 Monitoramento de Carregamento")
+    st.write("### 🚚 Monitoramento de Carregamento Ativo")
     c_scan, c_card = st.columns([1, 1.2])
     with c_scan: d_id = st.text_input("🆔 Bipar Driver ID:", key="fleet_scan_pro").strip()
 
@@ -160,29 +169,13 @@ with tab2:
             nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
             aberto = conn.table("log_fleet").select("*").eq("driver_id", d_id).is_("saida", "null").execute()
             
-            if aberto.data: # Finaliza ciclo (Bip de Saída)
-                res = aberto.data[0]
-                # Cálculo de tempo antes de fechar
-                ent = datetime.fromisoformat(res['entrada'].replace('Z', '+00:00'))
-                duracao = datetime.now().astimezone() - ent
-                tempo_txt = f"{int(duracao.total_seconds() // 60)} min"
-                
-                conn.table("log_fleet").update({
-                    "saida": datetime.now().isoformat(),
-                    "status": "Finalizado",
-                    "tempo_hub": tempo_txt
-                }).eq("id", res['id']).execute()
+            if aberto.data:
+                ent = datetime.fromisoformat(aberto.data[0]['entrada'].replace('Z', '+00:00'))
+                tempo_txt = f"{int((datetime.now().astimezone() - ent).total_seconds() // 60)} min"
+                conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "status": "Finalizado", "tempo_hub": tempo_txt}).eq("id", aberto.data[0]['id']).execute()
                 st.toast(f"🏁 FINALIZADO: {nome}")
-            else: # Inicia ciclo (Bip de Entrada)
-                conn.table("log_fleet").insert({
-                    "driver_id": str(d_id), # Força string para o SQL
-                    "nome": nome,
-                    "placa": placa,
-                    "data": hoje_str,
-                    "status": "Em Carregamento",
-                    "entrada": datetime.now().isoformat()
-                }).execute()
-                
+            else:
+                conn.table("log_fleet").insert({"driver_id": str(d_id), "nome": nome, "placa": placa, "data": hoje_str, "status": "Em Carregamento", "entrada": datetime.now().isoformat()}).execute()
                 if not st.session_state.ops_clock_running:
                     st.session_state.ops_clock_running, st.session_state.ops_start_time = True, datetime.now()
                 st.toast(f"🚚 CARREGANDO: {nome}")
@@ -191,15 +184,14 @@ with tab2:
             time.sleep(1); st.rerun()
     elif not d_id: st.session_state.last_bip_fleet = None
 
-    # RELATÓRIO DINÂMICO
     st.divider()
+    # RELATÓRIO DINÂMICO COLORIDO
     logs_live = conn.table("log_fleet").select("*").eq("data", hoje_str).is_("saida", "null").execute()
     if logs_live.data:
         cols_mon = st.columns(3)
         for i, row in enumerate(pd.DataFrame(logs_live.data).itertuples()):
             minutos = int((datetime.now().astimezone() - datetime.fromisoformat(row.entrada.replace('Z', '+00:00'))).total_seconds() / 60)
-            cor = "#28a745" if minutos <= 10 else "#ffc107" if minutos <= 15 else "#dc3545"
+            cor = "#28a745" if minutos <= 10 else "#ffc107" if minutos <= 12 else "#dc3545"
             with cols_mon[i % 3]:
                 st.markdown(f'<div style="background:{cor}; padding:15px; border-radius:10px; color:white; text-align:center;"><h2>{row.placa}</h2><p>{row.nome}</p><hr><h1 style="font-size:40px">{minutos} min</h1></div>', unsafe_allow_html=True)
-    else: st.info("Pátio vazio.")
-
+    else: st.info("Nenhum carregamento ativo no momento.")
