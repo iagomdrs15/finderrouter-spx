@@ -160,11 +160,29 @@ with tab2:
             nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
             aberto = conn.table("log_fleet").select("*").eq("driver_id", d_id).is_("saida", "null").execute()
             
-            if aberto.data: # Finaliza
-                conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "status": "Finalizado"}).eq("id", aberto.data[0]['id']).execute()
+            if aberto.data: # Finaliza ciclo (Bip de Saída)
+                res = aberto.data[0]
+                # Cálculo de tempo antes de fechar
+                ent = datetime.fromisoformat(res['entrada'].replace('Z', '+00:00'))
+                duracao = datetime.now().astimezone() - ent
+                tempo_txt = f"{int(duracao.total_seconds() // 60)} min"
+                
+                conn.table("log_fleet").update({
+                    "saida": datetime.now().isoformat(),
+                    "status": "Finalizado",
+                    "tempo_hub": tempo_txt
+                }).eq("id", res['id']).execute()
                 st.toast(f"🏁 FINALIZADO: {nome}")
-            else: # Inicia
-                conn.table("log_fleet").insert({"driver_id": d_id, "nome": nome, "placa": placa, "data": hoje_str, "status": "Em Carregamento", "entrada": datetime.now().isoformat()}).execute()
+            else: # Inicia ciclo (Bip de Entrada)
+                conn.table("log_fleet").insert({
+                    "driver_id": str(d_id), # Força string para o SQL
+                    "nome": nome,
+                    "placa": placa,
+                    "data": hoje_str,
+                    "status": "Em Carregamento",
+                    "entrada": datetime.now().isoformat()
+                }).execute()
+                
                 if not st.session_state.ops_clock_running:
                     st.session_state.ops_clock_running, st.session_state.ops_start_time = True, datetime.now()
                 st.toast(f"🚚 CARREGANDO: {nome}")
@@ -184,3 +202,4 @@ with tab2:
             with cols_mon[i % 3]:
                 st.markdown(f'<div style="background:{cor}; padding:15px; border-radius:10px; color:white; text-align:center;"><h2>{row.placa}</h2><p>{row.nome}</p><hr><h1 style="font-size:40px">{minutos} min</h1></div>', unsafe_allow_html=True)
     else: st.info("Pátio vazio.")
+
