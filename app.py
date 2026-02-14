@@ -73,45 +73,60 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
 tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 
 with tab1:
-    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_v4").strip()
+    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_print_v5").strip()
     if id_busca:
         aloc_alvo = pd.DataFrame()
+        # Busca integrada nas bases
         if not df_spx.empty and id_busca in df_spx['order_id'].astype(str).values:
             aloc_alvo = df_spx[df_spx['order_id'].astype(str) == id_busca]
             st.success("📦 Pedido Localizado!")
         elif not df_cluster.empty and id_busca in df_cluster['order_id'].astype(str).values:
             aloc_alvo = df_cluster[df_cluster['order_id'].astype(str) == id_busca]
-            st.info("📍 ID Localizado diretamente no Cluster")
+            st.info("📍 ID Localizado no Cluster")
 
         if not aloc_alvo.empty:
             p_lat, p_lon = aloc_alvo['latitude'].iloc[0], aloc_alvo['longitude'].iloc[0]
             df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(p_lat, p_lon, x['latitude'], x['longitude']), axis=1)
             sugestoes = df_cluster.sort_values('dist_km').drop_duplicates(subset=['corridor_cage']).head(3)
             
-            st.write("### 📍 Destinos Sugeridos")
+            # --- 🖼️ PRÉ-VISUALIZAÇÃO DA ETIQUETA (O DETERMINANTE VISUAL) ---
+            melhor_opcao = sugestoes.iloc[0]
+            st.write("### 📄 Pré-visualização da Etiqueta")
+            st.markdown(f"""
+            <div style="background:white; padding:30px; border-radius:10px; border: 5px solid black; width:350px; margin:auto; text-align:center; box-shadow: 10px 10px 0px #ff4b4b">
+                <p style="color:black; font-weight:bold; font-size:18px; margin:0; border-bottom:2px solid black">SPX EXPRESS - HUB PVH</p>
+                <h1 style="color:black; font-size:85px; margin:10px 0; font-family: 'Arial Black', Gadget, sans-serif">{melhor_opcao.corridor_cage}</h1>
+                <p style="color:black; font-size:14px; margin:0">ROTA: {melhor_opcao.corridor_cage} | DIST: {melhor_opcao.dist_km:.2f}km</p>
+                <div style="margin-top:15px; background:black; color:white; padding:5px; font-weight:bold">PARA ALOCAÇÃO IMEDIATA</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.divider()
+            
+            # --- 📍 OPÇÕES DE ALOCAÇÃO ---
+            st.write("### ⚙️ Ações de Alocação")
             cols = st.columns(len(sugestoes))
             for i, row in enumerate(sugestoes.itertuples()):
                 with cols[i]:
                     st.markdown(f"""
-                    <div style="background:#1e1e1e; padding:20px; border-radius:15px; border: 3px solid #ff4b4b; text-align:center">
-                        <p style="color:gray; font-size:12px; margin:0">GAIOLA / CORREDOR</p>
-                        <h1 style="color:#ff4b4b; margin:5px 0; font-size:55px">{row.corridor_cage}</h1>
-                        <p style="color:white; font-size:18px">{row.dist_km:.2f} km</p>
+                    <div style="background:#1e1e1e; padding:15px; border-radius:10px; border: 2px solid #ff4b4b; text-align:center; margin-bottom:10px">
+                        <h2 style="color:white; margin:0">{row.corridor_cage}</h2>
+                        <p style="color:#ff4b4b; font-weight:bold; margin:0">{row.dist_km:.2f} km</p>
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # INTEGRAÇÃO DO LINK DINÂMICO
+                    # Botão de Alocação Shopee
                     planned_id = str(getattr(row, 'planned_at', '')).strip()
                     if planned_id and planned_id != 'nan' and planned_id != '':
-                        link_spx = f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={planned_id}"
-                        st.link_button("📥 Alocar na Shopee", link_spx, use_container_width=True)
+                        st.link_button("📥 Alocar na Shopee", f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={planned_id}", use_container_width=True)
                     else:
-                        st.button("⚠️ ID Indisponível", use_container_width=True, disabled=True, help="Campo planned_at vazio no banco.")
+                        st.button("⚠️ Sem ID Task", use_container_width=True, disabled=True)
 
-                    if st.button(f"🖨️ Imprimir {row.corridor_cage}", key=f"p_v4_{i}", use_container_width=True):
-                        st.toast(f"Imprimindo etiqueta {row.corridor_cage}")
+                    if st.button(f"🖨️ Imprimir {row.corridor_cage}", key=f"print_v5_{i}", use_container_width=True):
+                        st.balloons()
+                        st.toast(f"Enviando etiqueta {row.corridor_cage} para a Zebra...", icon="✅")
         else:
-            st.error("❌ Pedido não encontrado nas bases.")
+            st.error("❌ Pedido não encontrado. Verifique a coluna spx_tn.")
 
 with tab2:
     st.write("### 📥 Fleet Control")
@@ -125,3 +140,4 @@ with tab2:
             st.rerun()
     elif not d_id:
         st.session_state.last_bip = None
+
