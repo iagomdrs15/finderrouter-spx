@@ -12,7 +12,7 @@ conn = st.connection("supabase", type=SupabaseConnection)
 HUB_LAT, HUB_LON = -8.791172513071563, -63.847713631142135
 hoje_str = datetime.now().strftime("%d/%m/%Y")
 
-# --- 2. TRADUTOR DE COLUNAS (O DETERMINANTE) ---
+# --- 2. TRADUTOR E NORMALIZADOR ---
 def normalizar_dados(df, mapa_sinonimos):
     if df is None or df.empty: return pd.DataFrame()
     df.columns = [str(c).lower().strip().replace(" ", "_") for c in df.columns]
@@ -25,8 +25,8 @@ def normalizar_dados(df, mapa_sinonimos):
 
 SINONIMOS = {
     'order_id': ['order_id', 'pedido', 'id', 'rastreio'],
-    'latitude': ['latitude', 'lat', 'y', 'lat_y'],
-    'longitude': ['longitude', 'long', 'x', 'lng', 'lon_x'],
+    'latitude': ['latitude', 'lat', 'y'],
+    'longitude': ['longitude', 'long', 'x', 'lng'],
     'corridor_cage': ['corridor_cage', 'gaiola', 'cluster', 'setor'],
     'driver_id': ['driver_id', 'id_motorista', 'cpf'],
     'driver_name': ['driver_name', 'nome', 'motorista'],
@@ -34,7 +34,7 @@ SINONIMOS = {
     'planned_at': ['planned_at', 'id_planejamento', 'task_id']
 }
 
-# --- 3. CARREGAMENTO COM TRATAMENTO NUMÉRICO ---
+# --- 3. CARREGAMENTO COM CORREÇÃO DE ESCALA (CONDIÇÃO) ---
 @st.cache_data(ttl=60)
 def carregar_bases_sql():
     try:
@@ -46,13 +46,17 @@ def carregar_bases_sql():
         df_cluster = normalizar_dados(cluster, SINONIMOS)
         df_fleet = normalizar_dados(fleet, SINONIMOS)
 
-        # RESOLUÇÃO DA DISTÂNCIA: Limpa e força conversão numérica
+        # ⚡ CONDIÇÃO DE AJUSTE GEOGRÁFICO
         for df in [df_spx, df_cluster]:
             if not df.empty:
                 for col in ['latitude', 'longitude']:
                     if col in df.columns:
-                        df[col] = df[col].astype(str).str.replace(',', '.')
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                        # Converte texto para número e limpa vírgulas
+                        df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce')
+                        
+                        # Se o número for maior que 90 ou menor que -90 (fora da escala global), divide por 10
+                        # Isso corrige o erro visto na imagem image_f7e7be.png
+                        df[col] = df[col].apply(lambda x: x/10 if pd.notna(x) and (x > 90 or x < -90) else x)
         
         return df_spx, df_cluster, df_fleet
     except:
@@ -71,101 +75,68 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
         return 2 * r * np.arcsin(np.sqrt(a))
     except: return 9999
 
-def style_sla(row):
-    color = '#28a745'
-    try:
-        if pd.notna(row['tempo_hub']) and ":" in str(row['tempo_hub']):
-            m = int(str(row['tempo_hub']).split(':')[1])
-            if m >= 15: color = '#ff4b4b'
-            elif m >= 11: color = '#f9d71c'
-    except: pass
-    return [f'background-color: {color}; color: black' if name == 'tempo_hub' else '' for name in row.index]
-
 # --- 5. INTERFACE ---
-tab1, tab2 = st.tabs(["🎯 Alocador de Pacotes", "🚚 Fleet Control"])
+tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 
 with tab1:
-    id_busca = st.text_input("🔎 Bipar Pedido (Order ID):", placeholder="Scan aqui...").strip()
+    id_busca = st.text_input("🔎 Bipar Pedido (Order ID):").strip()
     if id_busca:
         pacote = df_spx[df_spx['order_id'].astype(str) == id_busca] if not df_spx.empty else pd.DataFrame()
-        
         if not pacote.empty:
             p_lat, p_lon = pacote['latitude'].iloc[0], pacote['longitude'].iloc[0]
-            st.success(f"📦 Pedido {id_busca} Localizado!")
+            st.success(f"📦 Pedido Localizado! Coordenadas: {p_lat}, {p_lon}")
             
-            # Cruzamento de dados para Alocação
             df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(p_lat, p_lon, x['latitude'], x['longitude']), axis=1)
             sugestoes = df_cluster.sort_values('dist_km').head(3)
             
-            st.write("### 📍 Sugestões de Alocação")
             cols = st.columns(3)
             for i, row in enumerate(sugestoes.itertuples()):
                 with cols[i]:
-                    # Visualização da Etiqueta Premium
                     st.markdown(f"""
                     <div style="background:#1e1e1e; padding:20px; border-radius:15px; border: 2px solid #ff4b4b; text-align:center; margin-bottom:10px">
-                        <p style="color:gray; font-size:12px; margin:0">CLUSTER</p>
-                        <h1 style="color:white; margin:5px 0; font-size:50px">{row.corridor_cage}</h1>
+                        <h1 style="color:white; margin:0; font-size:45px">{row.corridor_cage}</h1>
                         <p style="color:#ff4b4b; font-weight:bold; margin:0">{row.dist_km:.2f} km</p>
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # Botões Separados: Alocar (Link) e Imprimir
-                    c_btn1, c_btn2 = st.columns(2)
                     id_shopee = getattr(row, 'planned_at', '')
-                    link_shopee = f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={id_shopee}"
-                    
-                    with c_btn1:
-                        st.link_button("📥 Alocar", link_shopee, use_container_width=True)
-                    with c_btn2:
-                        if st.button(f"🖨️ Imprimir", key=f"prt_{i}", use_container_width=True):
-                            st.toast(f"Etiqueta {row.corridor_cage} enviada!", icon="🖨️")
+                    st.link_button("📥 Alocar", f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={id_shopee}", use_container_width=True)
+                    if st.button(f"🖨️ Imprimir", key=f"prt_{i}", use_container_width=True):
+                        st.toast(f"Imprimindo {row.corridor_cage}...", icon="🖨️")
         else:
-            st.error("❌ Pedido não encontrado na base SQL.")
+            st.error("Pedido não encontrado.")
 
 with tab2:
     st.write("### 📥 Registro de Movimentação")
     col_in, col_card = st.columns([1, 1.2])
-    
     with col_in:
-        d_id = st.text_input("🆔 Bipar Driver ID:", key="fleet_scan").strip()
+        d_id = st.text_input("🆔 Bipar Driver ID:", key="f_scan").strip()
     
     if d_id and not df_fleet_base.empty:
         match = df_fleet_base[df_fleet_base['driver_id'].astype(str) == d_id]
         if not match.empty:
             nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
-            
-            # Placa Mercosul Refinada
             with col_card:
+                # Placa Mercosul de Alta Fidelidade
                 st.markdown(f"""
-                <div style="width:280px; background:white; border-radius:12px; border: 6px solid #003399; box-shadow: 5px 5px 15px rgba(0,0,0,0.5); overflow:hidden">
-                    <div style="background:#003399; height:35px; display:flex; align-items:center; justify-content:space-between; padding:0 15px">
-                        <span style="color:white; font-size:10px; font-weight:bold">BRASIL</span>
-                        <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Flag_of_Brazil.svg/200px-Flag_of_Brazil.svg.png" width="20">
+                <div style="width:280px; background:white; border-radius:10px; border: 4px solid #003399; box-shadow: 2px 2px 10px rgba(0,0,0,0.3)">
+                    <div style="background:#003399; color:white; font-size:10px; font-weight:bold; padding:2px 10px; display:flex; justify-content:space-between">
+                        <span>BRASIL</span>
+                        <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Flag_of_Brazil.svg/200px-Flag_of_Brazil.svg.png" width="15">
                     </div>
-                    <div style="height:80px; display:flex; align-items:center; justify-content:center">
-                        <h1 style="color:black; font-family:serif; font-size:55px; margin:0; letter-spacing:5px">{placa}</h1>
+                    <div style="text-align:center; padding:10px">
+                        <h1 style="color:black; font-family:serif; font-size:50px; margin:0; letter-spacing:4px">{placa}</h1>
                     </div>
                 </div>
-                <h3 style="margin-top:15px">{nome}</h3>
+                <h3 style="margin-top:10px">{nome}</h3>
                 """, unsafe_allow_html=True)
-
-            # Lógica de Registro SQL
+            # Lógica de Registro (Entrada/Saída)
             aberto = conn.table("log_fleet").select("*").eq("driver_id", d_id).is_("saida", "null").execute()
             if aberto.data:
-                res = aberto.data[0]
-                entrada_dt = datetime.fromisoformat(res['entrada'].replace('Z', '+00:00'))
-                tempo = str(datetime.now().astimezone() - entrada_dt).split('.')[0]
-                conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "tempo_hub": tempo}).eq("id", res['id']).execute()
-                st.toast(f"🏁 Saída: {nome}", icon="🏁")
+                conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "tempo_hub": "Calc..."}).eq("id", aberto.data[0]['id']).execute()
+                st.toast("🏁 Saída!", icon="🏁")
             else:
                 conn.table("log_fleet").insert({"driver_id": d_id, "nome": nome, "placa": placa, "data": hoje_str}).execute()
-                st.toast(f"📥 Entrada: {nome}", icon="📥")
-            
+                st.toast("📥 Entrada!", icon="📥")
             time.sleep(1)
             st.rerun()
-
-    st.divider()
-    logs = conn.table("log_fleet").select("*").eq("data", hoje_str).order("entrada", desc=True).execute()
-    if logs.data:
-        st.dataframe(pd.DataFrame(logs.data)[['nome', 'placa', 'entrada', 'tempo_hub']].style.apply(style_sla, axis=1), use_container_width=True)
