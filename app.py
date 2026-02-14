@@ -11,7 +11,7 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="Alocador SPX Pro SQL", layout="wide", page_icon="🚀")
 conn = st.connection("supabase", type=SupabaseConnection)
 
-# ATUALIZAÇÃO REDUZIDA: 30 segundos para estabilidade total do banco
+# ATUALIZAÇÃO ESTÁVEL: 30 segundos para evitar conflitos com o banco
 st_autorefresh(interval=30000, key="ops_pulse_stable")
 
 HUB_LAT, HUB_LON = -8.791172513071563, -63.847713631142135
@@ -74,7 +74,7 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
         return 2 * r * np.arcsin(np.sqrt(a))
     except: return 9999
 
-# --- 4. OPS CLOCK (VERSÃO ESTABILIZADA H:M) ---
+# --- 4. OPS CLOCK (ESTILIZADO H:M) ---
 if 'ops_clock_running' not in st.session_state: st.session_state.ops_clock_running = False
 if 'ops_start_time' not in st.session_state: st.session_state.ops_start_time = None
 
@@ -96,12 +96,12 @@ if st.session_state.ops_clock_running and st.session_state.ops_start_time:
     tempo_exibicao = f"{int(h):02d}:{int(m):02d}"
 
 with c_clock:
-    st.markdown(f'<div class="ops-clock-container"><span style="color:gray; font-size:10px;">OPERATIONS COMMAND (H:M)</span><br><span class="ops-time">{tempo_exibicao}</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="ops-clock-container"><span style="color:gray; font-size:10px;">OPERATIONS COMMAND</span><br><span class="ops-time">{tempo_exibicao}</span></div>', unsafe_allow_html=True)
 
 with c_clock_btn:
     if st.session_state.ops_clock_running:
         if st.button("🛑 PARAR OPS", use_container_width=True, type="primary"):
-            # Encerramento em massa: Limpa pátio e para o relógio
+            # Encerramento em massa automático
             conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "status": "Finalizado via Master Stop"}).is_("saida", "null").eq("data", hoje_str).execute()
             st.session_state.ops_clock_running = False
             st.session_state.ops_start_time = None
@@ -112,7 +112,7 @@ with c_clock_btn:
             st.session_state.ops_start_time = datetime.now()
             st.rerun()
 
-# --- 5. INTERFACE PRINCIPAL ---
+# --- 5. INTERFACE ---
 tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 
 with tab1:
@@ -159,47 +159,59 @@ with tab1:
                 st.markdown(html_label, unsafe_allow_html=True)
                 if st.button("🖨️ CONFIRMAR IMPRESSÃO", use_container_width=True, type="primary"):
                     components.html(html_label + "<script>window.onload = function() { window.print(); };</script>", height=0)
-                    st.toast("Enviado!", icon="✅")
-        else: st.error("❌ Não encontrado.")
+                    st.toast("Enviado para impressão!", icon="✅")
+        else: st.error("❌ Pedido não localizado.")
 
 with tab2:
-    st.write("### 🚚 Monitoramento de Pátio")
-    # Campo de texto limpo para bips
-    d_id = st.text_input("🆔 Bipar Driver ID:", key="input_fleet_stable", value="").strip()
+    st.write("### 🚚 Registro de Pátio (Anti-Loop)")
+    
+    # CHAVE DINÂMICA: Reseta o campo fisicamente a cada bip
+    if "input_key" not in st.session_state: st.session_state.input_key = 0
+
+    d_id = st.text_input(
+        "🆔 Bipar Driver ID:", 
+        key=f"fleet_input_{st.session_state.input_key}", 
+        value=""
+    ).strip()
 
     if d_id:
         match = df_fleet_base[df_fleet_base['driver_id'].astype(str) == d_id] if not df_fleet_base.empty else pd.DataFrame()
         if not match.empty:
             nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
-            # Anti-duplicidade: Verifica se já existe entrada aberta hoje
+            # Anti-duplicidade: Verifica se já existe entrada aberta
             aberto = conn.table("log_fleet").select("*").eq("driver_id", str(d_id)).is_("saida", "null").eq("data", hoje_str).execute()
             
             if aberto.data:
-                # SAÍDA
+                # REGISTRO DE SAÍDA
                 ent = datetime.fromisoformat(aberto.data[0]['entrada'].replace('Z', '+00:00'))
                 tempo_txt = f"{int((datetime.now().astimezone() - ent).total_seconds() // 60)} min"
                 conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "status": "Finalizado", "tempo_hub": tempo_txt}).eq("id", aberto.data[0]['id']).execute()
                 st.toast(f"🏁 SAÍDA: {nome}")
             else:
-                # ENTRADA
+                # REGISTRO DE ENTRADA
                 conn.table("log_fleet").insert({"driver_id": str(d_id), "nome": nome, "placa": placa, "data": hoje_str, "status": "Em Carregamento", "entrada": datetime.now().isoformat()}).execute()
                 if not st.session_state.ops_clock_running:
                     st.session_state.ops_clock_running, st.session_state.ops_start_time = True, datetime.now()
                 st.toast(f"🚚 ENTRADA: {nome}")
             
+            # ATUALIZA A CHAVE PARA LIMPAR O CAMPO
+            st.session_state.input_key += 1
             time.sleep(0.5)
-            st.rerun() # Limpa o campo e atualiza a grade
+            st.rerun()
         else:
             st.error("Driver não cadastrado.")
+            time.sleep(1)
+            st.session_state.input_key += 1
+            st.rerun()
 
     st.divider()
-    # Grade compacta de 4 colunas (Ideal para 12+ veículos)
+    # MONITORAMENTO EM GRADE COMPACTA (4 COLUNAS)
     logs_live = conn.table("log_fleet").select("*").eq("data", hoje_str).is_("saida", "null").execute()
     if logs_live.data:
         cols_mon = st.columns(4)
         for i, row in enumerate(pd.DataFrame(logs_live.data).itertuples()):
             minutos = int((datetime.now().astimezone() - datetime.fromisoformat(row.entrada.replace('Z', '+00:00'))).total_seconds() / 60)
-            # Regras de Cores: Verde (10), Amarelo (15), Vermelho (>15)
+            # CORES: Verde (10m), Amarelo (15m), Vermelho (>15m)
             cor = "#28a745" if minutos <= 10 else "#ffc107" if minutos <= 15 else "#dc3545"
             with cols_mon[i % 4]:
                 st.markdown(f'<div class="fleet-card" style="background:{cor};"><p style="margin:0; font-weight:bold;">{row.placa}</p><p style="font-size:10px; margin:0;">{row.nome[:15]}</p><h2 style="margin:0;">{minutos}m</h2></div>', unsafe_allow_html=True)
