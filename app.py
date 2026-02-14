@@ -117,15 +117,12 @@ tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 with tab1:
     id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_v7_final").strip()
     if id_busca:
-        # 1. BUSCA INTELIGENTE: Cluster como prioridade para erros de separação
+        # 1. BUSCA INTELIGENTE: Cluster como prioridade absoluta
         aloc_alvo = pd.DataFrame()
         
-        # Primeiro, verificamos se o ID já existe no Cluster (Indica re-alocação ou erro de triagem)
         if not df_cluster.empty and id_busca in df_cluster['order_id'].astype(str).values:
             aloc_alvo = df_cluster[df_cluster['order_id'].astype(str) == id_busca]
-            st.warning("⚠️ Erro de Separação Detectado: ID localizado diretamente no Cluster.")
-        
-        # Se não estiver no cluster, buscamos no SPX
+            st.warning("⚠️ Erro de Separação Detectado: ID localizado no Cluster.")
         elif not df_spx.empty and id_busca in df_spx['order_id'].astype(str).values:
             aloc_alvo = df_spx[df_spx['order_id'].astype(str) == id_busca]
             st.success("📦 Pedido Localizado no SPX.")
@@ -133,37 +130,37 @@ with tab1:
         if not aloc_alvo.empty:
             p_lat, p_lon = aloc_alvo['latitude'].iloc[0], aloc_alvo['longitude'].iloc[0]
             
-            # 2. FILTRAGEM DINÂMICA: Apenas rotas de motoristas ATIVOS no pátio
+            # 2. IDENTIFICAÇÃO DE MOTORISTAS NO PÁTIO
             logs_ativos = conn.table("log_fleet").select("placa").eq("data", hoje_str).is_("saida", "null").execute()
-            placas_no_patio = [r['placa'] for r in logs_ativos.data] if logs_ativos.data else []
+            placas_no_patio = [str(r['placa']).strip().upper() for r in logs_ativos.data] if logs_ativos.data else []
             
-            # Calculamos distância para todos
+            # Cálculo de distância
             df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(p_lat, p_lon, x['latitude'], x['longitude']), axis=1)
             
-            # Filtramos o cluster: Somente se a placa estiver no pátio OU se não houver ninguém (para não travar)
-            if placas_no_patio:
-                df_sugestao = df_cluster[df_cluster['license_plate'].isin(placas_no_patio)]
-                # Se não houver correspondência exata no pátio, voltamos ao cluster geral para não deixar o pacote sem destino
-                if df_sugestao.empty: df_sugestao = df_cluster
-            else:
-                df_sugestao = df_cluster
-
-            sugestoes = df_sugestao.sort_values('dist_km').drop_duplicates(subset=['corridor_cage']).head(3)
+            # 3. FILTRAGEM INTELIGENTE (Prioriza quem está no pátio)
+            # Usamos getattr para evitar o AttributeError caso a coluna falhe
+            df_cluster['no_patio'] = df_cluster.apply(lambda x: str(getattr(x, 'license_plate', '')).strip().upper() in placas_no_patio, axis=1)
+            
+            # Ordena por: 1º Estar no pátio (True primeiro), 2º Distância
+            sugestoes = df_cluster.sort_values(by=['no_patio', 'dist_km'], ascending=[False, True]).drop_duplicates(subset=['corridor_cage']).head(3)
 
             if 'selecao_index' not in st.session_state: st.session_state.selecao_index = 0
             row_sel = sugestoes.iloc[st.session_state.selecao_index]
 
             c1, c2 = st.columns([1, 1.2])
             with c1:
-                st.write("### Sugestões Ativas")
+                st.write("### Sugestões de Rota")
                 for i, row in enumerate(sugestoes.itertuples()):
-                    status_patio = "🚚 No Pátio" if row.license_plate in placas_no_patio else "⚪ Geral"
-                    if st.button(f"🎯 {row.corridor_cage} ({row.dist_km:.2f}km) - {status_patio}", key=f"sel_{i}", use_container_width=True):
+                    # Recuperação segura da placa para exibição
+                    placa_row = str(getattr(row, 'license_plate', 'S/P')).strip().upper()
+                    esta_ativo = "🚚 NO PÁTIO" if placa_row in placas_no_patio else "⚪ GERAL"
+                    
+                    if st.button(f"🎯 {row.corridor_cage} ({row.dist_km:.2f}km)\n{esta_ativo}", key=f"sel_{i}", use_container_width=True):
                         st.session_state.selecao_index = i
                         st.rerun()
 
             with c2:
-                # Layout de Impressão
+                # Layout de Impressão Profissional
                 p = str(row_sel.corridor_cage).split('-')
                 corredor, gaiola = p[0], p[1] if len(p) > 1 else "0"
                 html_label = f"""
@@ -179,8 +176,9 @@ with tab1:
                 st.markdown(html_label, unsafe_allow_html=True)
                 if st.button("🖨️ CONFIRMAR IMPRESSÃO", use_container_width=True, type="primary"):
                     components.html(html_label + "<script>window.onload = function() { window.print(); };</script>", height=0)
-                    st.toast("Etiqueta de Re-alocação Gerada!", icon="✅")
-        else: st.error("❌ ID não encontrado em nenhuma base.")
+                    st.toast("Impressão enviada!", icon="✅")
+        else:
+            st.error("❌ Pedido não localizado.")
 
 with tab2:
     st.write("### 🚚 Registro de Pátio (Anti-Loop)")
@@ -217,3 +215,4 @@ with tab2:
             with cols_mon[i % 4]:
                 st.markdown(f'<div class="fleet-card" style="background:{cor};"><p style="margin:0; font-weight:bold;">{row.placa}</p><p style="font-size:10px; margin:0;">{row.nome[:15]}</p><h2 style="margin:0;">{minutos}m</h2></div>', unsafe_allow_html=True)
     else: st.info("Pátio vazio.")
+
