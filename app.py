@@ -73,9 +73,9 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
 tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 
 with tab1:
-    id_busca = st.text_input("🔎 Bipar Pedido ou Gaiola:", key="input_aloc").strip()
+    id_busca = st.text_input("🔎 Bipar Pedido ou Gaiola:", key="input_aloc_v3").strip()
     if id_busca:
-        # BUSCA INTEGRADA: Tenta achar no SPX ou no CLUSTER
+        # BUSCA INTEGRADA
         aloc_alvo = pd.DataFrame()
         if not df_spx.empty and id_busca in df_spx['order_id'].astype(str).values:
             aloc_alvo = df_spx[df_spx['order_id'].astype(str) == id_busca]
@@ -87,22 +87,32 @@ with tab1:
         if not aloc_alvo.empty:
             p_lat, p_lon = aloc_alvo['latitude'].iloc[0], aloc_alvo['longitude'].iloc[0]
             
-            # Cruzamento Geográfico
+            # Cálculo de distância
             df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(p_lat, p_lon, x['latitude'], x['longitude']), axis=1)
-            sugestoes = df_cluster.sort_values('dist_km').head(3)
             
-            cols = st.columns(3)
+            # --- AJUSTE: REMOVE DUPLICADAS E PEGA OS 3 MELHORES DIFERENTES ---
+            # Aqui filtramos para não repetir o mesmo 'corridor_cage'
+            sugestoes = df_cluster.sort_values('dist_km').drop_duplicates(subset=['corridor_cage']).head(3)
+            
+            st.write("### 📍 Melhores Opções de Destino")
+            cols = st.columns(len(sugestoes)) # Ajusta colunas dinamicamente
+            
             for i, row in enumerate(sugestoes.itertuples()):
                 with cols[i]:
+                    # Design da Etiqueta com detalhamento de corredor/gaiola
                     st.markdown(f"""
-                    <div style="background:#1e1e1e; padding:15px; border-radius:10px; border: 2px solid #ff4b4b; text-align:center">
-                        <h2 style="color:white; margin:0">{row.corridor_cage}</h2>
-                        <p style="color:#ff4b4b; font-weight:bold; margin:0">{row.dist_km:.2f} km</p>
+                    <div style="background:#1e1e1e; padding:15px; border-radius:15px; border: 2px solid #ff4b4b; text-align:center; min-height:180px">
+                        <p style="color:gray; font-size:14px; margin:0">LOCALIDADE</p>
+                        <h2 style="color:white; margin:5px 0; font-size:32px">{row.corridor_cage}</h2>
+                        <hr style="border:0.5px solid #333">
+                        <p style="color:#ff4b4b; font-weight:bold; font-size:20px; margin:0">{row.dist_km:.2f} km</p>
                     </div>
                     """, unsafe_allow_html=True)
-                    st.link_button("📥 Alocar", f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={getattr(row, 'planned_at', '')}", use_container_width=True)
-                    if st.button(f"🖨️ Imprimir", key=f"print_{i}", use_container_width=True):
-                        st.toast("Impressora acionada!")
+                    
+                    id_shopee = getattr(row, 'planned_at', '')
+                    st.link_button("📥 Alocar", f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={id_shopee}", use_container_width=True)
+                    if st.button(f"🖨️ Imprimir Etiqueta", key=f"print_v3_{i}", use_container_width=True):
+                        st.toast(f"Imprimindo etiqueta para {row.corridor_cage}...", icon="🖨️")
         else:
             st.error("❌ ID não encontrado em nenhuma das bases.")
 
@@ -146,3 +156,4 @@ with tab2:
     logs = conn.table("log_fleet").select("*").eq("data", hoje_str).order("entrada", desc=True).execute()
     if logs.data:
         st.dataframe(pd.DataFrame(logs.data)[['nome', 'placa', 'entrada', 'tempo_hub']], use_container_width=True)
+
