@@ -3,3 +3,4 @@ pandas
 numpy
 datetime
 st-supabase-connection
+streamlit.components.v1
