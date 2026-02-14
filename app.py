@@ -11,8 +11,8 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="Alocador SPX Pro SQL", layout="wide", page_icon="🚀")
 conn = st.connection("supabase", type=SupabaseConnection)
 
-# Pulso dinâmico (1 segundo) para manter relógios e cards vivos
-st_autorefresh(interval=1000, key="ops_pulse")
+# ATUALIZAÇÃO REDUZIDA: 30 segundos para estabilidade total do banco
+st_autorefresh(interval=30000, key="ops_pulse_stable")
 
 HUB_LAT, HUB_LON = -8.791172513071563, -63.847713631142135
 hoje_str = datetime.now().strftime("%d/%m/%Y")
@@ -39,7 +39,7 @@ SINONIMOS = {
     'planned_at': ['planned_at', 'id_planejamento', 'task_id', 'id_tarefa']
 }
 
-# --- 3. CARREGAMENTO COM CORREÇÃO ---
+# --- 3. CARREGAMENTO DE DADOS ---
 @st.cache_data(ttl=60)
 def carregar_bases_sql():
     try:
@@ -74,56 +74,49 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
         return 2 * r * np.arcsin(np.sqrt(a))
     except: return 9999
 
-# --- 4. OPS CLOCK (MÉTRICA DE HUB COM AUTO-ENCERRAMENTO) ---
+# --- 4. OPS CLOCK (VERSÃO ESTABILIZADA H:M) ---
 if 'ops_clock_running' not in st.session_state: st.session_state.ops_clock_running = False
 if 'ops_start_time' not in st.session_state: st.session_state.ops_start_time = None
 
 st.markdown("""
     <style>
     .ops-clock-container { background: #1e1e1e; padding: 10px; border-radius: 10px; border-left: 5px solid #ff4b4b; text-align: center; }
-    .ops-time { font-family: 'Courier New', Courier, monospace; font-size: 28px; font-weight: bold; color: #ff4b4b; }
+    .ops-time { font-family: 'Courier New', Courier, monospace; font-size: 32px; font-weight: bold; color: #ff4b4b; }
     .fleet-card { padding: 8px; border-radius: 8px; color: white; text-align: center; margin-bottom: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.3); }
-    .fleet-plate { font-size: 16px; font-weight: bold; margin: 0; }
-    .fleet-time { font-size: 20px; font-weight: bold; margin: 0; }
-    .fleet-name { font-size: 10px; opacity: 0.8; overflow: hidden; white-space: nowrap; }
     </style>
 """, unsafe_allow_html=True)
 
 c_clock, c_clock_btn = st.columns([3, 1])
-tempo_exibicao = "00:00:00"
+tempo_exibicao = "00:00"
 
 if st.session_state.ops_clock_running and st.session_state.ops_start_time:
     decorrido = datetime.now() - st.session_state.ops_start_time
     h, r = divmod(decorrido.total_seconds(), 3600)
-    m, s = divmod(r, 60)
-    tempo_exibicao = f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
+    m, _ = divmod(r, 60)
+    tempo_exibicao = f"{int(h):02d}:{int(m):02d}"
 
 with c_clock:
-    st.markdown(f'<div class="ops-clock-container"><span style="color:gray; font-size:10px;">OPERATIONS COMMAND</span><br><span class="ops-time">{tempo_exibicao}</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="ops-clock-container"><span style="color:gray; font-size:10px;">OPERATIONS COMMAND (H:M)</span><br><span class="ops-time">{tempo_exibicao}</span></div>', unsafe_allow_html=True)
+
 with c_clock_btn:
     if st.session_state.ops_clock_running:
         if st.button("🛑 PARAR OPS", use_container_width=True, type="primary"):
-            # AÇÃO MESTRE: Encerra todas as rotas ativas no banco ao parar o clock
-            conn.table("log_fleet").update({
-                "saida": datetime.now().isoformat(),
-                "status": "Finalizado via Master Stop"
-            }).is_("saida", "null").eq("data", hoje_str).execute()
-            
+            # Encerramento em massa: Limpa pátio e para o relógio
+            conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "status": "Finalizado via Master Stop"}).is_("saida", "null").eq("data", hoje_str).execute()
             st.session_state.ops_clock_running = False
             st.session_state.ops_start_time = None
-            st.toast("Operação Encerrada e Pátio Limpo!", icon="⚠️")
             st.rerun()
     else:
-        if st.button("🚀 INICIAR CLOCK", use_container_width=True):
+        if st.button("🚀 INICIAR OPS", use_container_width=True):
             st.session_state.ops_clock_running = True
             st.session_state.ops_start_time = datetime.now()
             st.rerun()
 
-# --- 5. INTERFACE ---
+# --- 5. INTERFACE PRINCIPAL ---
 tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 
 with tab1:
-    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_vfinal").strip()
+    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_v6_final").strip()
     if id_busca:
         aloc_alvo = pd.DataFrame()
         if not df_spx.empty and id_busca in df_spx['order_id'].astype(str).values:
@@ -166,76 +159,48 @@ with tab1:
                 st.markdown(html_label, unsafe_allow_html=True)
                 if st.button("🖨️ CONFIRMAR IMPRESSÃO", use_container_width=True, type="primary"):
                     components.html(html_label + "<script>window.onload = function() { window.print(); };</script>", height=0)
-                    st.toast("Impressão solicitada!", icon="✅")
-        else: st.error("❌ Pedido não localizado.")
+                    st.toast("Enviado!", icon="✅")
+        else: st.error("❌ Não encontrado.")
 
 with tab2:
-    st.write("### 🚚 Monitoramento de Pátio (Grid Compacto)")
-    
-    # Campo de Bipagem sem callback imediato para dar tempo ao banco
-    d_id = st.text_input("🆔 Bipar Driver ID:", key="input_driver_sync", value="").strip()
+    st.write("### 🚚 Monitoramento de Pátio")
+    # Campo de texto limpo para bips
+    d_id = st.text_input("🆔 Bipar Driver ID:", key="input_fleet_stable", value="").strip()
 
     if d_id:
-        # 1. Busca os dados do motorista na base local
         match = df_fleet_base[df_fleet_base['driver_id'].astype(str) == d_id] if not df_fleet_base.empty else pd.DataFrame()
-        
         if not match.empty:
             nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
-            
-            # 2. Verifica registro aberto (Anti-duplicidade)
+            # Anti-duplicidade: Verifica se já existe entrada aberta hoje
             aberto = conn.table("log_fleet").select("*").eq("driver_id", str(d_id)).is_("saida", "null").eq("data", hoje_str).execute()
             
-            try:
-                if aberto.data:
-                    # Finaliza rota existente
-                    res = aberto.data[0]
-                    ent = datetime.fromisoformat(res['entrada'].replace('Z', '+00:00'))
-                    tempo_txt = f"{int((datetime.now().astimezone() - ent).total_seconds() // 60)} min"
-                    
-                    conn.table("log_fleet").update({
-                        "saida": datetime.now().isoformat(),
-                        "status": "Finalizado",
-                        "tempo_hub": tempo_txt
-                    }).eq("id", res['id']).execute()
-                    st.toast(f"🏁 FINALIZADO: {nome}")
-                else:
-                    # Inicia novo carregamento
-                    conn.table("log_fleet").insert({
-                        "driver_id": str(d_id),
-                        "nome": nome,
-                        "placa": placa,
-                        "data": hoje_str,
-                        "status": "Em Carregamento",
-                        "entrada": datetime.now().isoformat()
-                    }).execute()
-                    
-                    if not st.session_state.ops_clock_running:
-                        st.session_state.ops_clock_running, st.session_state.ops_start_time = True, datetime.now()
-                    st.toast(f"🚚 CARREGANDO: {nome}")
-
-                # --- 🔑 O SEGREDO DA LIMPEZA SEGURA ---
-                # Só chegamos aqui se o banco de dados NÃO der erro
-                time.sleep(0.3) # Pequena pausa de segurança para o bip ser processado
-                st.rerun() # O rerun limpa o campo naturalmente por causa do 'value=""'
-
-            except Exception as e:
-                st.error(f"Erro ao registrar: {e}")
+            if aberto.data:
+                # SAÍDA
+                ent = datetime.fromisoformat(aberto.data[0]['entrada'].replace('Z', '+00:00'))
+                tempo_txt = f"{int((datetime.now().astimezone() - ent).total_seconds() // 60)} min"
+                conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "status": "Finalizado", "tempo_hub": tempo_txt}).eq("id", aberto.data[0]['id']).execute()
+                st.toast(f"🏁 SAÍDA: {nome}")
+            else:
+                # ENTRADA
+                conn.table("log_fleet").insert({"driver_id": str(d_id), "nome": nome, "placa": placa, "data": hoje_str, "status": "Em Carregamento", "entrada": datetime.now().isoformat()}).execute()
+                if not st.session_state.ops_clock_running:
+                    st.session_state.ops_clock_running, st.session_state.ops_start_time = True, datetime.now()
+                st.toast(f"🚚 ENTRADA: {nome}")
+            
+            time.sleep(0.5)
+            st.rerun() # Limpa o campo e atualiza a grade
         else:
-            st.warning(f"Driver ID {d_id} não encontrado na base fleet.")
-            time.sleep(1)
-            st.rerun()
+            st.error("Driver não cadastrado.")
 
     st.divider()
-      # Grade de cards compacta (Manteve-se igual)
-    # ... (lógica de exibição dos cards) ...
+    # Grade compacta de 4 colunas (Ideal para 12+ veículos)
     logs_live = conn.table("log_fleet").select("*").eq("data", hoje_str).is_("saida", "null").execute()
     if logs_live.data:
         cols_mon = st.columns(4)
         for i, row in enumerate(pd.DataFrame(logs_live.data).itertuples()):
             minutos = int((datetime.now().astimezone() - datetime.fromisoformat(row.entrada.replace('Z', '+00:00'))).total_seconds() / 60)
+            # Regras de Cores: Verde (10), Amarelo (15), Vermelho (>15)
             cor = "#28a745" if minutos <= 10 else "#ffc107" if minutos <= 15 else "#dc3545"
             with cols_mon[i % 4]:
-                st.markdown(f'<div class="fleet-card" style="background:{cor};"><p class="fleet-plate">{row.placa}</p><p class="fleet-name">{row.nome[:15]}</p><p class="fleet-time">{minutos} min</p></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="fleet-card" style="background:{cor};"><p style="margin:0; font-weight:bold;">{row.placa}</p><p style="font-size:10px; margin:0;">{row.nome[:15]}</p><h2 style="margin:0;">{minutos}m</h2></div>', unsafe_allow_html=True)
     else: st.info("Pátio vazio.")
-
-
