@@ -4,6 +4,7 @@ import numpy as np
 from datetime import datetime
 import time
 from st_supabase_connection import SupabaseConnection
+import streamlit.components.v1 as components
 
 # --- 1. CONFIGURAÇÕES E CONEXÃO ---
 st.set_page_config(page_title="Alocador SPX Pro SQL", layout="wide", page_icon="🚀")
@@ -73,60 +74,84 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
 tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 
 with tab1:
-    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_print_v5").strip()
+    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_final_v6").strip()
+    
     if id_busca:
+        # 1. BUSCA INTEGRADA
         aloc_alvo = pd.DataFrame()
-        # Busca integrada nas bases
         if not df_spx.empty and id_busca in df_spx['order_id'].astype(str).values:
             aloc_alvo = df_spx[df_spx['order_id'].astype(str) == id_busca]
-            st.success("📦 Pedido Localizado!")
         elif not df_cluster.empty and id_busca in df_cluster['order_id'].astype(str).values:
             aloc_alvo = df_cluster[df_cluster['order_id'].astype(str) == id_busca]
-            st.info("📍 ID Localizado no Cluster")
 
         if not aloc_alvo.empty:
             p_lat, p_lon = aloc_alvo['latitude'].iloc[0], aloc_alvo['longitude'].iloc[0]
             df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(p_lat, p_lon, x['latitude'], x['longitude']), axis=1)
             sugestoes = df_cluster.sort_values('dist_km').drop_duplicates(subset=['corridor_cage']).head(3)
-            
-            # --- 🖼️ PRÉ-VISUALIZAÇÃO DA ETIQUETA (O DETERMINANTE VISUAL) ---
-            melhor_opcao = sugestoes.iloc[0]
-            st.write("### 📄 Pré-visualização da Etiqueta")
-            st.markdown(f"""
-            <div style="background:white; padding:30px; border-radius:10px; border: 5px solid black; width:350px; margin:auto; text-align:center; box-shadow: 10px 10px 0px #ff4b4b">
-                <p style="color:black; font-weight:bold; font-size:18px; margin:0; border-bottom:2px solid black">SPX EXPRESS - HUB PVH</p>
-                <h1 style="color:black; font-size:85px; margin:10px 0; font-family: 'Arial Black', Gadget, sans-serif">{melhor_opcao.corridor_cage}</h1>
-                <p style="color:black; font-size:14px; margin:0">ROTA: {melhor_opcao.corridor_cage} | DIST: {melhor_opcao.dist_km:.2f}km</p>
-                <div style="margin-top:15px; background:black; color:white; padding:5px; font-weight:bold">PARA ALOCAÇÃO IMEDIATA</div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.divider()
-            
-            # --- 📍 OPÇÕES DE ALOCAÇÃO ---
-            st.write("### ⚙️ Ações de Alocação")
-            cols = st.columns(len(sugestoes))
-            for i, row in enumerate(sugestoes.itertuples()):
-                with cols[i]:
-                    st.markdown(f"""
-                    <div style="background:#1e1e1e; padding:15px; border-radius:10px; border: 2px solid #ff4b4b; text-align:center; margin-bottom:10px">
-                        <h2 style="color:white; margin:0">{row.corridor_cage}</h2>
-                        <p style="color:#ff4b4b; font-weight:bold; margin:0">{row.dist_km:.2f} km</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Botão de Alocação Shopee
-                    planned_id = str(getattr(row, 'planned_at', '')).strip()
-                    if planned_id and planned_id != 'nan' and planned_id != '':
-                        st.link_button("📥 Alocar na Shopee", f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={planned_id}", use_container_width=True)
-                    else:
-                        st.button("⚠️ Sem ID Task", use_container_width=True, disabled=True)
 
-                    if st.button(f"🖨️ Imprimir {row.corridor_cage}", key=f"print_v5_{i}", use_container_width=True):
-                        st.balloons()
-                        st.toast(f"Enviando etiqueta {row.corridor_cage} para a Zebra...", icon="✅")
+            # --- 🚀 LÓGICA DE SELEÇÃO DINÂMICA ---
+            if 'selecao_index' not in st.session_state:
+                st.session_state.selecao_index = 0
+
+            row_selecionada = sugestoes.iloc[st.session_state.selecao_index]
+
+            # --- 🖼️ LAYOUT DE DUAS COLUNAS (SOLICITADO) ---
+            c1, c2 = st.columns([1, 1.2])
+
+            with c1:
+                st.success(f"📍 Referência: {'Pacote' if id_busca in df_spx['order_id'].values else 'HUB'}")
+                st.write("### Sugestões")
+                
+                for i, row in enumerate(sugestoes.itertuples()):
+                    # Botão para mudar a pré-visualização
+                    if st.button(f"🎯 Selecionar {row.corridor_cage} ({row.dist_km:.2f}km)", key=f"sel_{i}", use_container_width=True):
+                        st.session_state.selecao_index = i
+                        st.rerun()
+                    
+                    # Ações rápidas dentro da lista
+                    with st.expander(f"⚙️ Opções para {row.corridor_cage}"):
+                        pid = str(getattr(row, 'planned_at', '')).strip()
+                        st.link_button("🔗 Alocar na Shopee", f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={pid}", use_container_width=True)
+
+            with c2:
+                st.write("### 📄 Pré-visualização e Impressão")
+                # Detalhamento para o layout de impressão
+                p = str(row_selecionada.corridor_cage).split('-')
+                corredor = p[0]
+                gaiola = p[1] if len(p) > 1 else "0"
+                bairro = getattr(row_selecionada, 'cluster', 'PVH')
+                obs = "ALOCAÇÃO IMEDIATA"
+
+                # LAYOUT DE IMPRESSÃO PROFISSIONAL (O DETERMINANTE)
+                html_label = f"""
+                <style>
+                    .box {{ width: 330px; height: 230px; border: 4px solid #000; font-family: Arial; background: white; margin: auto; }}
+                    .header {{ background: #000; color: #fff; text-align: center; padding: 5px; font-weight: bold; font-size: 14px; }}
+                    .split {{ display: flex; border-bottom: 3px solid #000; height: 110px; }}
+                    .side {{ flex: 1; text-align: center; border-right: 3px solid #000; display: flex; flex-direction: column; justify-content: center; }}
+                    .big {{ font-size: 65px; font-weight: bold; line-height: 0.9; color: black; }}
+                    .bairro {{ background: #eee; text-align: center; padding: 8px; font-weight: bold; text-transform: uppercase; border-bottom: 2px dashed black; font-size: 16px; color: black; }}
+                    .footer {{ text-align: center; padding: 5px; font-size: 10px; color: black; }}
+                </style>
+                <div class="box">
+                    <div class="header">SPX - PORTO VELHO HUB</div>
+                    <div class="split">
+                        <div class="side"><div>CORREDOR</div><div class="big">{corredor}</div></div>
+                        <div class="side" style="border:none;"><div>GAIOLA</div><div class="big">{gaiola}</div></div>
+                    </div>
+                    <div class="bairro">{bairro}</div>
+                    <div class="footer"><b>{obs}</b><br>ID: {id_busca} | {datetime.now().strftime("%d/%m/%Y %H:%M")}</div>
+                </div>
+                """
+                st.markdown(html_label, unsafe_allow_html=True)
+                
+                if st.button("🖨️ CONFIRMAR IMPRESSÃO", use_container_width=True, type="primary"):
+                    # Dispara a impressão real
+                    print_script = html_label + "<script>window.print();</script>"
+                    components.html(print_script, height=0)
+                    st.toast("Enviando para a Zebra...", icon="✅")
         else:
-            st.error("❌ Pedido não encontrado. Verifique a coluna spx_tn.")
+            st.error("❌ Pedido não encontrado.")
 
 with tab2:
     st.write("### 📥 Fleet Control")
@@ -140,4 +165,5 @@ with tab2:
             st.rerun()
     elif not d_id:
         st.session_state.last_bip = None
+
 
