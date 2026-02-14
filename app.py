@@ -11,7 +11,7 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="Alocador SPX Pro SQL", layout="wide", page_icon="🚀")
 conn = st.connection("supabase", type=SupabaseConnection)
 
-# ATUALIZAÇÃO ESTÁVEL: 30 segundos para evitar conflitos com o banco
+# Atualização estável de 30 segundos
 st_autorefresh(interval=30000, key="ops_pulse_stable")
 
 HUB_LAT, HUB_LON = -8.791172513071563, -63.847713631142135
@@ -39,7 +39,7 @@ SINONIMOS = {
     'planned_at': ['planned_at', 'id_planejamento', 'task_id', 'id_tarefa']
 }
 
-# --- 3. CARREGAMENTO DE DADOS ---
+# --- 3. CARREGAMENTO ---
 @st.cache_data(ttl=60)
 def carregar_bases_sql():
     try:
@@ -74,7 +74,7 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
         return 2 * r * np.arcsin(np.sqrt(a))
     except: return 9999
 
-# --- 4. OPS CLOCK (ESTILIZADO H:M) ---
+# --- 4. OPS CLOCK ---
 if 'ops_clock_running' not in st.session_state: st.session_state.ops_clock_running = False
 if 'ops_start_time' not in st.session_state: st.session_state.ops_start_time = None
 
@@ -101,7 +101,6 @@ with c_clock:
 with c_clock_btn:
     if st.session_state.ops_clock_running:
         if st.button("🛑 PARAR OPS", use_container_width=True, type="primary"):
-            # Encerramento em massa automático
             conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "status": "Finalizado via Master Stop"}).is_("saida", "null").eq("data", hoje_str).execute()
             st.session_state.ops_clock_running = False
             st.session_state.ops_start_time = None
@@ -116,34 +115,55 @@ with c_clock_btn:
 tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 
 with tab1:
-    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_v6_final").strip()
+    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_v7_final").strip()
     if id_busca:
+        # 1. BUSCA INTELIGENTE: Cluster como prioridade para erros de separação
         aloc_alvo = pd.DataFrame()
-        if not df_spx.empty and id_busca in df_spx['order_id'].astype(str).values:
-            aloc_alvo = df_spx[df_spx['order_id'].astype(str) == id_busca]
-        elif not df_cluster.empty and id_busca in df_cluster['order_id'].astype(str).values:
+        
+        # Primeiro, verificamos se o ID já existe no Cluster (Indica re-alocação ou erro de triagem)
+        if not df_cluster.empty and id_busca in df_cluster['order_id'].astype(str).values:
             aloc_alvo = df_cluster[df_cluster['order_id'].astype(str) == id_busca]
+            st.warning("⚠️ Erro de Separação Detectado: ID localizado diretamente no Cluster.")
+        
+        # Se não estiver no cluster, buscamos no SPX
+        elif not df_spx.empty and id_busca in df_spx['order_id'].astype(str).values:
+            aloc_alvo = df_spx[df_spx['order_id'].astype(str) == id_busca]
+            st.success("📦 Pedido Localizado no SPX.")
 
         if not aloc_alvo.empty:
             p_lat, p_lon = aloc_alvo['latitude'].iloc[0], aloc_alvo['longitude'].iloc[0]
+            
+            # 2. FILTRAGEM DINÂMICA: Apenas rotas de motoristas ATIVOS no pátio
+            logs_ativos = conn.table("log_fleet").select("placa").eq("data", hoje_str).is_("saida", "null").execute()
+            placas_no_patio = [r['placa'] for r in logs_ativos.data] if logs_ativos.data else []
+            
+            # Calculamos distância para todos
             df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(p_lat, p_lon, x['latitude'], x['longitude']), axis=1)
-            sugestoes = df_cluster.sort_values('dist_km').drop_duplicates(subset=['corridor_cage']).head(3)
+            
+            # Filtramos o cluster: Somente se a placa estiver no pátio OU se não houver ninguém (para não travar)
+            if placas_no_patio:
+                df_sugestao = df_cluster[df_cluster['license_plate'].isin(placas_no_patio)]
+                # Se não houver correspondência exata no pátio, voltamos ao cluster geral para não deixar o pacote sem destino
+                if df_sugestao.empty: df_sugestao = df_cluster
+            else:
+                df_sugestao = df_cluster
+
+            sugestoes = df_sugestao.sort_values('dist_km').drop_duplicates(subset=['corridor_cage']).head(3)
 
             if 'selecao_index' not in st.session_state: st.session_state.selecao_index = 0
             row_sel = sugestoes.iloc[st.session_state.selecao_index]
 
             c1, c2 = st.columns([1, 1.2])
             with c1:
-                st.success(f"📍 Referência: {'Pacote' if id_busca in df_spx['order_id'].values else 'HUB'}")
+                st.write("### Sugestões Ativas")
                 for i, row in enumerate(sugestoes.itertuples()):
-                    if st.button(f"🎯 Selecionar {row.corridor_cage} ({row.dist_km:.2f}km)", key=f"sel_{i}", use_container_width=True):
+                    status_patio = "🚚 No Pátio" if row.license_plate in placas_no_patio else "⚪ Geral"
+                    if st.button(f"🎯 {row.corridor_cage} ({row.dist_km:.2f}km) - {status_patio}", key=f"sel_{i}", use_container_width=True):
                         st.session_state.selecao_index = i
                         st.rerun()
-                    with st.expander(f"⚙️ Opções {row.corridor_cage}"):
-                        pid = str(getattr(row, 'planned_at', '')).strip()
-                        st.link_button("🔗 Alocar na Shopee", f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={pid}", use_container_width=True)
 
             with c2:
+                # Layout de Impressão
                 p = str(row_sel.corridor_cage).split('-')
                 corredor, gaiola = p[0], p[1] if len(p) > 1 else "0"
                 html_label = f"""
@@ -154,64 +174,45 @@ with tab1:
                         <div style="flex:1; text-align:center; display:flex; flex-direction:column; justify-content:center;"><div>GAIOLA</div><div style="font-size:65px; font-weight:bold;">{gaiola}</div></div>
                     </div>
                     <div style="background:#eee; text-align:center; padding:8px; font-weight:bold; text-transform:uppercase; border-bottom:2px dashed black; font-size:16px;">{getattr(row_sel, 'cluster', 'PVH')}</div>
-                    <div style="text-align:center; padding:5px; font-size:10px;"><b>ALOCAÇÃO IMEDIATA</b><br>ID: {id_busca} | {datetime.now().strftime("%d/%m/%Y %H:%M")}</div>
+                    <div style="text-align:center; padding:5px; font-size:10px;"><b>ALOCAÇÃO INTELIGENTE</b><br>ID: {id_busca} | {datetime.now().strftime("%d/%m/%Y %H:%M")}</div>
                 </div>"""
                 st.markdown(html_label, unsafe_allow_html=True)
                 if st.button("🖨️ CONFIRMAR IMPRESSÃO", use_container_width=True, type="primary"):
                     components.html(html_label + "<script>window.onload = function() { window.print(); };</script>", height=0)
-                    st.toast("Enviado para impressão!", icon="✅")
-        else: st.error("❌ Pedido não localizado.")
+                    st.toast("Etiqueta de Re-alocação Gerada!", icon="✅")
+        else: st.error("❌ ID não encontrado em nenhuma base.")
 
 with tab2:
     st.write("### 🚚 Registro de Pátio (Anti-Loop)")
-    
-    # CHAVE DINÂMICA: Reseta o campo fisicamente a cada bip
     if "input_key" not in st.session_state: st.session_state.input_key = 0
-
-    d_id = st.text_input(
-        "🆔 Bipar Driver ID:", 
-        key=f"fleet_input_{st.session_state.input_key}", 
-        value=""
-    ).strip()
+    d_id = st.text_input("🆔 Bipar Driver ID:", key=f"fleet_input_{st.session_state.input_key}", value="").strip()
 
     if d_id:
         match = df_fleet_base[df_fleet_base['driver_id'].astype(str) == d_id] if not df_fleet_base.empty else pd.DataFrame()
         if not match.empty:
             nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
-            # Anti-duplicidade: Verifica se já existe entrada aberta
             aberto = conn.table("log_fleet").select("*").eq("driver_id", str(d_id)).is_("saida", "null").eq("data", hoje_str).execute()
             
             if aberto.data:
-                # REGISTRO DE SAÍDA
                 ent = datetime.fromisoformat(aberto.data[0]['entrada'].replace('Z', '+00:00'))
                 tempo_txt = f"{int((datetime.now().astimezone() - ent).total_seconds() // 60)} min"
                 conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "status": "Finalizado", "tempo_hub": tempo_txt}).eq("id", aberto.data[0]['id']).execute()
-                st.toast(f"🏁 SAÍDA: {nome}")
             else:
-                # REGISTRO DE ENTRADA
                 conn.table("log_fleet").insert({"driver_id": str(d_id), "nome": nome, "placa": placa, "data": hoje_str, "status": "Em Carregamento", "entrada": datetime.now().isoformat()}).execute()
                 if not st.session_state.ops_clock_running:
                     st.session_state.ops_clock_running, st.session_state.ops_start_time = True, datetime.now()
-                st.toast(f"🚚 ENTRADA: {nome}")
             
-            # ATUALIZA A CHAVE PARA LIMPAR O CAMPO
             st.session_state.input_key += 1
             time.sleep(0.5)
             st.rerun()
-        else:
-            st.error("Driver não cadastrado.")
-            time.sleep(1)
-            st.session_state.input_key += 1
-            st.rerun()
+        else: st.error("Driver não cadastrado.")
 
     st.divider()
-    # MONITORAMENTO EM GRADE COMPACTA (4 COLUNAS)
     logs_live = conn.table("log_fleet").select("*").eq("data", hoje_str).is_("saida", "null").execute()
     if logs_live.data:
         cols_mon = st.columns(4)
         for i, row in enumerate(pd.DataFrame(logs_live.data).itertuples()):
             minutos = int((datetime.now().astimezone() - datetime.fromisoformat(row.entrada.replace('Z', '+00:00'))).total_seconds() / 60)
-            # CORES: Verde (10m), Amarelo (15m), Vermelho (>15m)
             cor = "#28a745" if minutos <= 10 else "#ffc107" if minutos <= 15 else "#dc3545"
             with cols_mon[i % 4]:
                 st.markdown(f'<div class="fleet-card" style="background:{cor};"><p style="margin:0; font-weight:bold;">{row.placa}</p><p style="font-size:10px; margin:0;">{row.nome[:15]}</p><h2 style="margin:0;">{minutos}m</h2></div>', unsafe_allow_html=True)
