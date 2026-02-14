@@ -25,19 +25,19 @@ def normalizar_dados(df, mapa_sinonimos):
 
 SINONIMOS = {
     'order_id': ['order_id', 'pedido', 'id', 'rastreio'],
-    'latitude': ['latitude', 'lat', 'y'],
-    'longitude': ['longitude', 'long', 'x', 'lng'],
+    'latitude': ['latitude', 'lat', 'y', 'lat_y'],
+    'longitude': ['longitude', 'long', 'x', 'lng', 'lon_x'],
     'corridor_cage': ['corridor_cage', 'gaiola', 'cluster', 'setor'],
     'driver_id': ['driver_id', 'id_motorista', 'cpf'],
     'driver_name': ['driver_name', 'nome', 'motorista'],
-    'license_plate': ['license_plate', 'placa']
+    'license_plate': ['license_plate', 'placa'],
+    'planned_at': ['planned_at', 'id_planejamento', 'task_id']
 }
 
 # --- 3. CARREGAMENTO COM TRATAMENTO NUMÉRICO ---
 @st.cache_data(ttl=60)
 def carregar_bases_sql():
     try:
-        # Busca dados e força conversão para garantir cálculo de distância
         spx = pd.DataFrame(conn.table("base_spx").select("*").execute().data)
         cluster = pd.DataFrame(conn.table("base_cluster").select("*").execute().data)
         fleet = pd.DataFrame(conn.table("base_fleet").select("*").execute().data)
@@ -46,11 +46,13 @@ def carregar_bases_sql():
         df_cluster = normalizar_dados(cluster, SINONIMOS)
         df_fleet = normalizar_dados(fleet, SINONIMOS)
 
-        # CORREÇÃO DA DISTÂNCIA 9999: Força colunas a serem números
+        # RESOLUÇÃO DA DISTÂNCIA: Limpa e força conversão numérica
         for df in [df_spx, df_cluster]:
             if not df.empty:
-                df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
-                df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+                for col in ['latitude', 'longitude']:
+                    if col in df.columns:
+                        df[col] = df[col].astype(str).str.replace(',', '.')
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
         
         return df_spx, df_cluster, df_fleet
     except:
@@ -70,12 +72,12 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     except: return 9999
 
 def style_sla(row):
-    color = '#28a745' # Verde
+    color = '#28a745'
     try:
         if pd.notna(row['tempo_hub']) and ":" in str(row['tempo_hub']):
             m = int(str(row['tempo_hub']).split(':')[1])
-            if m >= 15: color = '#ff4b4b' # Vermelho
-            elif m >= 11: color = '#f9d71c' # Amarelo
+            if m >= 15: color = '#ff4b4b'
+            elif m >= 11: color = '#f9d71c'
     except: pass
     return [f'background-color: {color}; color: black' if name == 'tempo_hub' else '' for name in row.index]
 
@@ -99,22 +101,31 @@ with tab1:
             cols = st.columns(3)
             for i, row in enumerate(sugestoes.itertuples()):
                 with cols[i]:
-                    # Visualização da Etiqueta em destaque
+                    # Visualização da Etiqueta Premium
                     st.markdown(f"""
-                    <div style="background:#1e1e1e; padding:20px; border-radius:10px; border: 2px solid #ff4b4b; text-align:center">
-                        <h1 style="color:#ff4b4b; margin:0">{row.corridor_cage}</h1>
-                        <p style="color:gray; margin:0">{row.dist_km:.2f} km de distância</p>
+                    <div style="background:#1e1e1e; padding:20px; border-radius:15px; border: 2px solid #ff4b4b; text-align:center; margin-bottom:10px">
+                        <p style="color:gray; font-size:12px; margin:0">CLUSTER</p>
+                        <h1 style="color:white; margin:5px 0; font-size:50px">{row.corridor_cage}</h1>
+                        <p style="color:#ff4b4b; font-weight:bold; margin:0">{row.dist_km:.2f} km</p>
                     </div>
                     """, unsafe_allow_html=True)
-                    if st.button(f"🖨️ Alocar em {row.corridor_cage}", key=f"btn_{i}"):
-                        st.balloons() # Animação de sucesso
-                        st.toast(f"Alocado com sucesso: {row.corridor_cage}", icon="✅")
+                    
+                    # Botões Separados: Alocar (Link) e Imprimir
+                    c_btn1, c_btn2 = st.columns(2)
+                    id_shopee = getattr(row, 'planned_at', '')
+                    link_shopee = f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={id_shopee}"
+                    
+                    with c_btn1:
+                        st.link_button("📥 Alocar", link_shopee, use_container_width=True)
+                    with c_btn2:
+                        if st.button(f"🖨️ Imprimir", key=f"prt_{i}", use_container_width=True):
+                            st.toast(f"Etiqueta {row.corridor_cage} enviada!", icon="🖨️")
         else:
             st.error("❌ Pedido não encontrado na base SQL.")
 
 with tab2:
     st.write("### 📥 Registro de Movimentação")
-    col_in, col_card = st.columns([1, 1])
+    col_in, col_card = st.columns([1, 1.2])
     
     with col_in:
         d_id = st.text_input("🆔 Bipar Driver ID:", key="fleet_scan").strip()
@@ -124,14 +135,19 @@ with tab2:
         if not match.empty:
             nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
             
-            # Animação da Placa em Destaque
+            # Placa Mercosul Refinada
             with col_card:
                 st.markdown(f"""
-                <div style="background:white; padding:10px; border-radius:5px; border: 4px solid black; text-align:center; width:200px">
-                    <p style="color:black; font-weight:bold; font-size:12px; margin:0; border-bottom:1px solid black">BRASIL</p>
-                    <h2 style="color:black; margin:5px 0; font-family:serif">{placa}</h2>
+                <div style="width:280px; background:white; border-radius:12px; border: 6px solid #003399; box-shadow: 5px 5px 15px rgba(0,0,0,0.5); overflow:hidden">
+                    <div style="background:#003399; height:35px; display:flex; align-items:center; justify-content:space-between; padding:0 15px">
+                        <span style="color:white; font-size:10px; font-weight:bold">BRASIL</span>
+                        <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Flag_of_Brazil.svg/200px-Flag_of_Brazil.svg.png" width="20">
+                    </div>
+                    <div style="height:80px; display:flex; align-items:center; justify-content:center">
+                        <h1 style="color:black; font-family:serif; font-size:55px; margin:0; letter-spacing:5px">{placa}</h1>
+                    </div>
                 </div>
-                <h3 style="margin-top:10px">{nome}</h3>
+                <h3 style="margin-top:15px">{nome}</h3>
                 """, unsafe_allow_html=True)
 
             # Lógica de Registro SQL
@@ -141,17 +157,15 @@ with tab2:
                 entrada_dt = datetime.fromisoformat(res['entrada'].replace('Z', '+00:00'))
                 tempo = str(datetime.now().astimezone() - entrada_dt).split('.')[0]
                 conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "tempo_hub": tempo}).eq("id", res['id']).execute()
-                st.toast(f"🏁 Saída Registrada!", icon="🏁")
+                st.toast(f"🏁 Saída: {nome}", icon="🏁")
             else:
                 conn.table("log_fleet").insert({"driver_id": d_id, "nome": nome, "placa": placa, "data": hoje_str}).execute()
-                st.toast(f"📥 Entrada Registrada!", icon="📥")
+                st.toast(f"📥 Entrada: {nome}", icon="📥")
             
-            time.sleep(1) # Pausa para ver a animação
+            time.sleep(1)
             st.rerun()
 
-    # Tabela de Histórico
     st.divider()
     logs = conn.table("log_fleet").select("*").eq("data", hoje_str).order("entrada", desc=True).execute()
     if logs.data:
         st.dataframe(pd.DataFrame(logs.data)[['nome', 'placa', 'entrada', 'tempo_hub']].style.apply(style_sla, axis=1), use_container_width=True)
-
