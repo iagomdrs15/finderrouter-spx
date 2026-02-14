@@ -34,7 +34,7 @@ SINONIMOS = {
     'planned_at': ['planned_at', 'id_planejamento', 'task_id']
 }
 
-# --- 3. CARREGAMENTO COM CORREÇÃO DE ESCALA (CONDIÇÃO) ---
+# --- 3. CARREGAMENTO COM SUPER CORREÇÃO GEOGRÁFICA ---
 @st.cache_data(ttl=60)
 def carregar_bases_sql():
     try:
@@ -46,17 +46,18 @@ def carregar_bases_sql():
         df_cluster = normalizar_dados(cluster, SINONIMOS)
         df_fleet = normalizar_dados(fleet, SINONIMOS)
 
-        # ⚡ CONDIÇÃO DE AJUSTE GEOGRÁFICO
+        # ⚡ CORREÇÃO MATEMÁTICA BRUTA (Resolve nan e 9999km)
         for df in [df_spx, df_cluster]:
             if not df.empty:
                 for col in ['latitude', 'longitude']:
                     if col in df.columns:
-                        # Converte texto para número e limpa vírgulas
-                        df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce')
-                        
-                        # Se o número for maior que 90 ou menor que -90 (fora da escala global), divide por 10
-                        # Isso corrige o erro visto na imagem image_f7e7be.png
-                        df[col] = df[col].apply(lambda x: x/10 if pd.notna(x) and (x > 90 or x < -90) else x)
+                        # 1. Força tudo para string e substitui vírgulas
+                        df[col] = df[col].astype(str).str.replace(',', '.')
+                        # 2. Converte para numérico, transformando erros em NaN
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                        # 3. Se o valor estiver multiplicado (ex: -87.0 em vez de -8.7), divide por 10
+                        # Baseado na sua imagem image_f7e7be.png
+                        df[col] = df[col].apply(lambda x: x/10 if pd.notna(x) and (x > 90 or x < -90 or x > 180 or x < -180) else x)
         
         return df_spx, df_cluster, df_fleet
     except:
@@ -68,6 +69,8 @@ df_spx, df_cluster, df_fleet_base = carregar_bases_sql()
 def calcular_distancia(lat1, lon1, lat2, lon2):
     try:
         if any(pd.isna([lat1, lon1, lat2, lon2])): return 9999
+        # Validação extra para garantir que são floats válidos
+        lat1, lon1, lat2, lon2 = map(float, [lat1, lon1, lat2, lon2])
         r = 6371 
         p1, p2 = np.radians(lat1), np.radians(lat2)
         dp, dl = np.radians(lat2 - lat1), np.radians(lon2 - lon1)
@@ -79,12 +82,12 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
 tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 
 with tab1:
-    id_busca = st.text_input("🔎 Bipar Pedido (Order ID):").strip()
+    id_busca = st.text_input("🔎 Bipar Pedido (Order ID):", key="search_input").strip()
     if id_busca:
         pacote = df_spx[df_spx['order_id'].astype(str) == id_busca] if not df_spx.empty else pd.DataFrame()
         if not pacote.empty:
             p_lat, p_lon = pacote['latitude'].iloc[0], pacote['longitude'].iloc[0]
-            st.success(f"📦 Pedido Localizado! Coordenadas: {p_lat}, {p_lon}")
+            st.success(f"📦 Pedido Localizado! Coordenadas Corrigidas: {p_lat}, {p_lon}")
             
             df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(p_lat, p_lon, x['latitude'], x['longitude']), axis=1)
             sugestoes = df_cluster.sort_values('dist_km').head(3)
@@ -104,39 +107,56 @@ with tab1:
                     if st.button(f"🖨️ Imprimir", key=f"prt_{i}", use_container_width=True):
                         st.toast(f"Imprimindo {row.corridor_cage}...", icon="🖨️")
         else:
-            st.error("Pedido não encontrado.")
+            st.error("Pedido não encontrado na base SPX.")
 
 with tab2:
     st.write("### 📥 Registro de Movimentação")
     col_in, col_card = st.columns([1, 1.2])
     with col_in:
-        d_id = st.text_input("🆔 Bipar Driver ID:", key="f_scan").strip()
+        # Usa o on_change para processar o bip apenas uma vez (Trava Anti-Loop)
+        d_id = st.text_input("🆔 Bipar Driver ID:", key="f_scan_input").strip()
     
     if d_id and not df_fleet_base.empty:
-        match = df_fleet_base[df_fleet_base['driver_id'].astype(str) == d_id]
-        if not match.empty:
-            nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
-            with col_card:
-                # Placa Mercosul de Alta Fidelidade
-                st.markdown(f"""
-                <div style="width:280px; background:white; border-radius:10px; border: 4px solid #003399; box-shadow: 2px 2px 10px rgba(0,0,0,0.3)">
-                    <div style="background:#003399; color:white; font-size:10px; font-weight:bold; padding:2px 10px; display:flex; justify-content:space-between">
-                        <span>BRASIL</span>
-                        <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Flag_of_Brazil.svg/200px-Flag_of_Brazil.svg.png" width="15">
+        # Prevenção de loop: verifica se já processamos este ID nesta sessão
+        if "last_bip" not in st.session_state or st.session_state.last_bip != d_id:
+            match = df_fleet_base[df_fleet_base['driver_id'].astype(str) == d_id]
+            if not match.empty:
+                nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
+                
+                # Renderiza a placa Mercosul
+                with col_card:
+                    st.markdown(f"""
+                    <div style="width:280px; background:white; border-radius:10px; border: 4px solid #003399; box-shadow: 2px 2px 10px rgba(0,0,0,0.3)">
+                        <div style="background:#003399; color:white; font-size:10px; font-weight:bold; padding:2px 10px; display:flex; justify-content:space-between">
+                            <span>BRASIL</span>
+                            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Flag_of_Brazil.svg/200px-Flag_of_Brazil.svg.png" width="15">
+                        </div>
+                        <div style="text-align:center; padding:10px">
+                            <h1 style="color:black; font-family:serif; font-size:50px; margin:0; letter-spacing:4px">{placa}</h1>
+                        </div>
                     </div>
-                    <div style="text-align:center; padding:10px">
-                        <h1 style="color:black; font-family:serif; font-size:50px; margin:0; letter-spacing:4px">{placa}</h1>
-                    </div>
-                </div>
-                <h3 style="margin-top:10px">{nome}</h3>
-                """, unsafe_allow_html=True)
-            # Lógica de Registro (Entrada/Saída)
-            aberto = conn.table("log_fleet").select("*").eq("driver_id", d_id).is_("saida", "null").execute()
-            if aberto.data:
-                conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "tempo_hub": "Calc..."}).eq("id", aberto.data[0]['id']).execute()
-                st.toast("🏁 Saída!", icon="🏁")
+                    <h3 style="margin-top:10px">{nome}</h3>
+                    """, unsafe_allow_html=True)
+
+                # Lógica de Registro Único
+                aberto = conn.table("log_fleet").select("*").eq("driver_id", d_id).is_("saida", "null").execute()
+                if aberto.data:
+                    conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "tempo_hub": "Calc..."}).eq("id", aberto.data[0]['id']).execute()
+                    st.toast(f"🏁 Saída Registrada para {nome}!", icon="🏁")
+                else:
+                    conn.table("log_fleet").insert({"driver_id": d_id, "nome": nome, "placa": placa, "data": hoje_str}).execute()
+                    st.toast(f"📥 Entrada Registrada para {nome}!", icon="📥")
+                
+                st.session_state.last_bip = d_id # Marca como processado
+                time.sleep(1)
+                st.rerun()
             else:
-                conn.table("log_fleet").insert({"driver_id": d_id, "nome": nome, "placa": placa, "data": hoje_str}).execute()
-                st.toast("📥 Entrada!", icon="📥")
-            time.sleep(1)
-            st.rerun()
+                st.error("Motorista não cadastrado.")
+    elif not d_id:
+        st.session_state.last_bip = None # Reseta quando o campo limpa
+
+    # Tabela de Histórico fixa com refresh
+    st.divider()
+    logs_res = conn.table("log_fleet").select("*").eq("data", hoje_str).order("entrada", desc=True).execute()
+    if logs_res.data:
+        st.dataframe(pd.DataFrame(logs_res.data)[['nome', 'placa', 'entrada', 'tempo_hub']], use_container_width=True)
