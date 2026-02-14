@@ -70,14 +70,41 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
         return 2 * r * np.arcsin(np.sqrt(a))
     except: return 9999
 
-# --- 4. INTERFACE ---
+# --- 4. OPS CLOCK (MÉTRICA DE HUB) ---
+if 'ops_clock_running' not in st.session_state: st.session_state.ops_clock_running = False
+if 'ops_start_time' not in st.session_state: st.session_state.ops_start_time = None
+
+st.markdown("""
+    <style>
+    .ops-clock-container { background: #1e1e1e; padding: 10px; border-radius: 10px; border-left: 5px solid #ff4b4b; text-align: center; }
+    .ops-time { font-family: 'Courier New', Courier, monospace; font-size: 32px; font-weight: bold; color: #ff4b4b; }
+    </style>
+""", unsafe_allow_html=True)
+
+c_clock, c_clock_btn = st.columns([3, 1])
+tempo_exibicao = "00:00:00"
+if st.session_state.ops_clock_running and st.session_state.ops_start_time:
+    decorrido = datetime.now() - st.session_state.ops_start_time
+    h, r = divmod(decorrido.total_seconds(), 3600)
+    m, s = divmod(r, 60)
+    tempo_exibicao = f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
+
+with c_clock:
+    st.markdown(f'<div class="ops-clock-container"><span style="color:gray; font-size:10px;">HUB OPERATIONS CLOCK</span><br><span class="ops-time">{tempo_exibicao}</span></div>', unsafe_allow_html=True)
+with c_clock_btn:
+    if st.session_state.ops_clock_running:
+        if st.button("🛑 PARAR OPS", use_container_width=True):
+            st.session_state.ops_clock_running = False
+            st.session_state.ops_start_time = None
+            st.rerun()
+    else: st.info("Clock Inativo")
+
+# --- 5. INTERFACE PRINCIPAL ---
 tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 
 with tab1:
-    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_final_v6").strip()
-    
+    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_v6").strip()
     if id_busca:
-        # 1. BUSCA INTEGRADA
         aloc_alvo = pd.DataFrame()
         if not df_spx.empty and id_busca in df_spx['order_id'].astype(str).values:
             aloc_alvo = df_spx[df_spx['order_id'].astype(str) == id_busca]
@@ -89,81 +116,71 @@ with tab1:
             df_cluster['dist_km'] = df_cluster.apply(lambda x: calcular_distancia(p_lat, p_lon, x['latitude'], x['longitude']), axis=1)
             sugestoes = df_cluster.sort_values('dist_km').drop_duplicates(subset=['corridor_cage']).head(3)
 
-            # --- 🚀 LÓGICA DE SELEÇÃO DINÂMICA ---
-            if 'selecao_index' not in st.session_state:
-                st.session_state.selecao_index = 0
+            if 'selecao_index' not in st.session_state: st.session_state.selecao_index = 0
+            row_sel = sugestoes.iloc[st.session_state.selecao_index]
 
-            row_selecionada = sugestoes.iloc[st.session_state.selecao_index]
-
-            # --- 🖼️ LAYOUT DE DUAS COLUNAS (SOLICITADO) ---
             c1, c2 = st.columns([1, 1.2])
-
             with c1:
                 st.success(f"📍 Referência: {'Pacote' if id_busca in df_spx['order_id'].values else 'HUB'}")
-                st.write("### Sugestões")
-                
                 for i, row in enumerate(sugestoes.itertuples()):
-                    # Botão para mudar a pré-visualização
                     if st.button(f"🎯 Selecionar {row.corridor_cage} ({row.dist_km:.2f}km)", key=f"sel_{i}", use_container_width=True):
                         st.session_state.selecao_index = i
                         st.rerun()
-                    
-                    # Ações rápidas dentro da lista
-                    with st.expander(f"⚙️ Opções para {row.corridor_cage}"):
+                    with st.expander(f"⚙️ Opções {row.corridor_cage}"):
                         pid = str(getattr(row, 'planned_at', '')).strip()
                         st.link_button("🔗 Alocar na Shopee", f"https://spx.shopee.com.br/#/assignment-task/detailNoLabel?id={pid}", use_container_width=True)
 
             with c2:
-                st.write("### 📄 Pré-visualização e Impressão")
-                # Detalhamento para o layout de impressão
-                p = str(row_selecionada.corridor_cage).split('-')
-                corredor = p[0]
-                gaiola = p[1] if len(p) > 1 else "0"
-                bairro = getattr(row_selecionada, 'cluster', 'PVH')
-                obs = "ALOCAÇÃO IMEDIATA"
-
-                # LAYOUT DE IMPRESSÃO PROFISSIONAL (O DETERMINANTE)
+                p = str(row_sel.corridor_cage).split('-')
+                corredor, gaiola = p[0], p[1] if len(p) > 1 else "0"
                 html_label = f"""
-                <style>
-                    .box {{ width: 330px; height: 230px; border: 4px solid #000; font-family: Arial; background: white; margin: auto; }}
-                    .header {{ background: #000; color: #fff; text-align: center; padding: 5px; font-weight: bold; font-size: 14px; }}
-                    .split {{ display: flex; border-bottom: 3px solid #000; height: 110px; }}
-                    .side {{ flex: 1; text-align: center; border-right: 3px solid #000; display: flex; flex-direction: column; justify-content: center; }}
-                    .big {{ font-size: 65px; font-weight: bold; line-height: 0.9; color: black; }}
-                    .bairro {{ background: #eee; text-align: center; padding: 8px; font-weight: bold; text-transform: uppercase; border-bottom: 2px dashed black; font-size: 16px; color: black; }}
-                    .footer {{ text-align: center; padding: 5px; font-size: 10px; color: black; }}
-                </style>
-                <div class="box">
-                    <div class="header">SPX - PORTO VELHO HUB</div>
-                    <div class="split">
-                        <div class="side"><div>CORREDOR</div><div class="big">{corredor}</div></div>
-                        <div class="side" style="border:none;"><div>GAIOLA</div><div class="big">{gaiola}</div></div>
+                <div style="width:330px; height:230px; border:4px solid #000; font-family:Arial; background:white; margin:auto;">
+                    <div style="background:#000; color:#fff; text-align:center; padding:5px; font-weight:bold;">SPX - PORTO VELHO HUB</div>
+                    <div style="display:flex; border-bottom:3px solid #000; height:110px;">
+                        <div style="flex:1; text-align:center; border-right:3px solid #000; display:flex; flex-direction:column; justify-content:center;"><div>CORREDOR</div><div style="font-size:65px; font-weight:bold; color:black;">{corredor}</div></div>
+                        <div style="flex:1; text-align:center; display:flex; flex-direction:column; justify-content:center;"><div>GAIOLA</div><div style="font-size:65px; font-weight:bold; color:black;">{gaiola}</div></div>
                     </div>
-                    <div class="bairro">{bairro}</div>
-                    <div class="footer"><b>{obs}</b><br>ID: {id_busca} | {datetime.now().strftime("%d/%m/%Y %H:%M")}</div>
-                </div>
-                """
+                    <div style="background:#eee; text-align:center; padding:8px; font-weight:bold; text-transform:uppercase; border-bottom:2px dashed black; font-size:16px; color:black;">{getattr(row_sel, 'cluster', 'PVH')}</div>
+                    <div style="text-align:center; padding:5px; font-size:10px; color:black;"><b>ALOCAÇÃO IMEDIATA</b><br>ID: {id_busca} | {datetime.now().strftime("%d/%m/%Y %H:%M")}</div>
+                </div>"""
                 st.markdown(html_label, unsafe_allow_html=True)
-                
                 if st.button("🖨️ CONFIRMAR IMPRESSÃO", use_container_width=True, type="primary"):
-                    # Dispara a impressão real
-                    print_script = html_label + "<script>window.print();</script>"
-                    components.html(print_script, height=0)
-                    st.toast("Enviando para a Zebra...", icon="✅")
-        else:
-            st.error("❌ Pedido não encontrado.")
+                    components.html(html_label + "<script>window.print();</script>", height=0)
+                    st.toast("Enviado!", icon="✅")
+        else: st.error("❌ Não encontrado.")
 
 with tab2:
-    st.write("### 📥 Fleet Control")
-    d_id = st.text_input("🆔 Bipar Driver ID:", key="fleet_v4").strip()
-    if d_id and st.session_state.get('last_bip') != d_id:
+    st.write("### 🚚 Monitoramento de Carregamento")
+    c_scan, c_card = st.columns([1, 1.2])
+    with c_scan: d_id = st.text_input("🆔 Bipar Driver ID:", key="fleet_scan_pro").strip()
+
+    if d_id and st.session_state.get('last_bip_fleet') != d_id:
         match = df_fleet_base[df_fleet_base['driver_id'].astype(str) == d_id] if not df_fleet_base.empty else pd.DataFrame()
         if not match.empty:
             nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
-            st.markdown(f"<h2>{placa} - {nome}</h2>", unsafe_allow_html=True)
-            st.session_state.last_bip = d_id
-            st.rerun()
-    elif not d_id:
-        st.session_state.last_bip = None
+            aberto = conn.table("log_fleet").select("*").eq("driver_id", d_id).is_("saida", "null").execute()
+            
+            if aberto.data: # Finaliza
+                conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "status": "Finalizado"}).eq("id", aberto.data[0]['id']).execute()
+                st.toast(f"🏁 FINALIZADO: {nome}")
+            else: # Inicia
+                conn.table("log_fleet").insert({"driver_id": d_id, "nome": nome, "placa": placa, "data": hoje_str, "status": "Em Carregamento", "entrada": datetime.now().isoformat()}).execute()
+                if not st.session_state.ops_clock_running:
+                    st.session_state.ops_clock_running, st.session_state.ops_start_time = True, datetime.now()
+                st.toast(f"🚚 CARREGANDO: {nome}")
+            
+            st.session_state.last_bip_fleet = d_id
+            time.sleep(1); st.rerun()
+    elif not d_id: st.session_state.last_bip_fleet = None
 
-
+    # RELATÓRIO DINÂMICO
+    st.divider()
+    logs_live = conn.table("log_fleet").select("*").eq("data", hoje_str).is_("saida", "null").execute()
+    if logs_live.data:
+        cols_mon = st.columns(3)
+        for i, row in enumerate(pd.DataFrame(logs_live.data).itertuples()):
+            minutos = int((datetime.now().astimezone() - datetime.fromisoformat(row.entrada.replace('Z', '+00:00'))).total_seconds() / 60)
+            cor = "#28a745" if minutos <= 10 else "#ffc107" if minutos <= 15 else "#dc3545"
+            with cols_mon[i % 3]:
+                st.markdown(f'<div style="background:{cor}; padding:15px; border-radius:10px; color:white; text-align:center;"><h2>{row.placa}</h2><p>{row.nome}</p><hr><h1 style="font-size:40px">{minutos} min</h1></div>', unsafe_allow_html=True)
+    else: st.info("Pátio vazio.")
