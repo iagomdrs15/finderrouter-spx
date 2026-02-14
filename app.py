@@ -11,7 +11,7 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="Alocador SPX Pro SQL", layout="wide", page_icon="🚀")
 conn = st.connection("supabase", type=SupabaseConnection)
 
-# Atualização automática a cada 1 segundo para o Ops Clock e Cronômetros
+# Pulso dinâmico (1 segundo) para manter relógios e cards vivos
 st_autorefresh(interval=1000, key="ops_pulse")
 
 HUB_LAT, HUB_LON = -8.791172513071563, -63.847713631142135
@@ -74,14 +74,18 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
         return 2 * r * np.arcsin(np.sqrt(a))
     except: return 9999
 
-# --- 4. OPS CLOCK (MÉTRICA DE HUB) ---
+# --- 4. OPS CLOCK (MÉTRICA DE HUB COM AUTO-ENCERRAMENTO) ---
 if 'ops_clock_running' not in st.session_state: st.session_state.ops_clock_running = False
 if 'ops_start_time' not in st.session_state: st.session_state.ops_start_time = None
 
 st.markdown("""
     <style>
     .ops-clock-container { background: #1e1e1e; padding: 10px; border-radius: 10px; border-left: 5px solid #ff4b4b; text-align: center; }
-    .ops-time { font-family: 'Courier New', Courier, monospace; font-size: 32px; font-weight: bold; color: #ff4b4b; }
+    .ops-time { font-family: 'Courier New', Courier, monospace; font-size: 28px; font-weight: bold; color: #ff4b4b; }
+    .fleet-card { padding: 8px; border-radius: 8px; color: white; text-align: center; margin-bottom: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.3); }
+    .fleet-plate { font-size: 16px; font-weight: bold; margin: 0; }
+    .fleet-time { font-size: 20px; font-weight: bold; margin: 0; }
+    .fleet-name { font-size: 10px; opacity: 0.8; overflow: hidden; white-space: nowrap; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -95,12 +99,19 @@ if st.session_state.ops_clock_running and st.session_state.ops_start_time:
     tempo_exibicao = f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
 
 with c_clock:
-    st.markdown(f'<div class="ops-clock-container"><span style="color:gray; font-size:10px;">HUB OPERATIONS CLOCK</span><br><span class="ops-time">{tempo_exibicao}</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="ops-clock-container"><span style="color:gray; font-size:10px;">OPERATIONS COMMAND</span><br><span class="ops-time">{tempo_exibicao}</span></div>', unsafe_allow_html=True)
 with c_clock_btn:
     if st.session_state.ops_clock_running:
         if st.button("🛑 PARAR OPS", use_container_width=True, type="primary"):
+            # AÇÃO MESTRE: Encerra todas as rotas ativas no banco ao parar o clock
+            conn.table("log_fleet").update({
+                "saida": datetime.now().isoformat(),
+                "status": "Finalizado via Master Stop"
+            }).is_("saida", "null").eq("data", hoje_str).execute()
+            
             st.session_state.ops_clock_running = False
             st.session_state.ops_start_time = None
+            st.toast("Operação Encerrada e Pátio Limpo!", icon="⚠️")
             st.rerun()
     else:
         if st.button("🚀 INICIAR CLOCK", use_container_width=True):
@@ -112,7 +123,7 @@ with c_clock_btn:
 tab1, tab2 = st.tabs(["🎯 Alocador", "🚚 Fleet Control"])
 
 with tab1:
-    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_v6").strip()
+    id_busca = st.text_input("🔎 Bipar Pedido (Order ID / SPX_TN):", key="aloc_vfinal").strip()
     if id_busca:
         aloc_alvo = pd.DataFrame()
         if not df_spx.empty and id_busca in df_spx['order_id'].astype(str).values:
@@ -143,24 +154,24 @@ with tab1:
                 p = str(row_sel.corridor_cage).split('-')
                 corredor, gaiola = p[0], p[1] if len(p) > 1 else "0"
                 html_label = f"""
-                <div style="width:330px; height:230px; border:4px solid #000; font-family:Arial; background:white; margin:auto;">
+                <div style="width:330px; height:230px; border:4px solid #000; font-family:Arial; background:white; margin:auto; color:black;">
                     <div style="background:#000; color:#fff; text-align:center; padding:5px; font-weight:bold; font-size:14px;">SPX - PORTO VELHO HUB</div>
                     <div style="display:flex; border-bottom:3px solid #000; height:110px;">
-                        <div style="flex:1; text-align:center; border-right:3px solid #000; display:flex; flex-direction:column; justify-content:center;"><div>CORREDOR</div><div style="font-size:65px; font-weight:bold; color:black;">{corredor}</div></div>
-                        <div style="flex:1; text-align:center; display:flex; flex-direction:column; justify-content:center;"><div>GAIOLA</div><div style="font-size:65px; font-weight:bold; color:black;">{gaiola}</div></div>
+                        <div style="flex:1; text-align:center; border-right:3px solid #000; display:flex; flex-direction:column; justify-content:center;"><div>CORREDOR</div><div style="font-size:65px; font-weight:bold;">{corredor}</div></div>
+                        <div style="flex:1; text-align:center; display:flex; flex-direction:column; justify-content:center;"><div>GAIOLA</div><div style="font-size:65px; font-weight:bold;">{gaiola}</div></div>
                     </div>
-                    <div style="background:#eee; text-align:center; padding:8px; font-weight:bold; text-transform:uppercase; border-bottom:2px dashed black; font-size:16px; color:black;">{getattr(row_sel, 'cluster', 'PVH')}</div>
-                    <div style="text-align:center; padding:5px; font-size:10px; color:black;"><b>ALOCAÇÃO IMEDIATA</b><br>ID: {id_busca} | {datetime.now().strftime("%d/%m/%Y %H:%M")}</div>
+                    <div style="background:#eee; text-align:center; padding:8px; font-weight:bold; text-transform:uppercase; border-bottom:2px dashed black; font-size:16px;">{getattr(row_sel, 'cluster', 'PVH')}</div>
+                    <div style="text-align:center; padding:5px; font-size:10px;"><b>ALOCAÇÃO IMEDIATA</b><br>ID: {id_busca} | {datetime.now().strftime("%d/%m/%Y %H:%M")}</div>
                 </div>"""
                 st.markdown(html_label, unsafe_allow_html=True)
                 if st.button("🖨️ CONFIRMAR IMPRESSÃO", use_container_width=True, type="primary"):
                     components.html(html_label + "<script>window.onload = function() { window.print(); };</script>", height=0)
-                    st.toast("Enviado para impressão!", icon="✅")
+                    st.toast("Impressão solicitada!", icon="✅")
         else: st.error("❌ Pedido não localizado.")
 
 with tab2:
-    st.write("### 🚚 Monitoramento de Carregamento Ativo")
-    c_scan, c_card = st.columns([1, 1.2])
+    st.write("### 🚚 Monitoramento de Pátio (Grid Compacto)")
+    c_scan, _ = st.columns([1, 2])
     with c_scan: d_id = st.text_input("🆔 Bipar Driver ID:", key="fleet_scan_pro").strip()
 
     if d_id and st.session_state.get('last_bip_fleet') != d_id:
@@ -169,29 +180,25 @@ with tab2:
             nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
             aberto = conn.table("log_fleet").select("*").eq("driver_id", d_id).is_("saida", "null").execute()
             
-            if aberto.data:
-                ent = datetime.fromisoformat(aberto.data[0]['entrada'].replace('Z', '+00:00'))
-                tempo_txt = f"{int((datetime.now().astimezone() - ent).total_seconds() // 60)} min"
-                conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "status": "Finalizado", "tempo_hub": tempo_txt}).eq("id", aberto.data[0]['id']).execute()
-                st.toast(f"🏁 FINALIZADO: {nome}")
-            else:
+            if aberto.data: # Saída
+                conn.table("log_fleet").update({"saida": datetime.now().isoformat(), "status": "Finalizado"}).eq("id", aberto.data[0]['id']).execute()
+            else: # Entrada
                 conn.table("log_fleet").insert({"driver_id": str(d_id), "nome": nome, "placa": placa, "data": hoje_str, "status": "Em Carregamento", "entrada": datetime.now().isoformat()}).execute()
                 if not st.session_state.ops_clock_running:
                     st.session_state.ops_clock_running, st.session_state.ops_start_time = True, datetime.now()
-                st.toast(f"🚚 CARREGANDO: {nome}")
             
             st.session_state.last_bip_fleet = d_id
-            time.sleep(1); st.rerun()
+            st.rerun()
     elif not d_id: st.session_state.last_bip_fleet = None
 
     st.divider()
-    # RELATÓRIO DINÂMICO COLORIDO
+    # Grade compacta de 4 colunas para monitorar 12+ veículos
     logs_live = conn.table("log_fleet").select("*").eq("data", hoje_str).is_("saida", "null").execute()
     if logs_live.data:
-        cols_mon = st.columns(3)
+        cols_mon = st.columns(4)
         for i, row in enumerate(pd.DataFrame(logs_live.data).itertuples()):
             minutos = int((datetime.now().astimezone() - datetime.fromisoformat(row.entrada.replace('Z', '+00:00'))).total_seconds() / 60)
-            cor = "#28a745" if minutos <= 10 else "#ffc107" if minutos <= 12 else "#dc3545"
-            with cols_mon[i % 3]:
-                st.markdown(f'<div style="background:{cor}; padding:15px; border-radius:10px; color:white; text-align:center;"><h2>{row.placa}</h2><p>{row.nome}</p><hr><h1 style="font-size:40px">{minutos} min</h1></div>', unsafe_allow_html=True)
-    else: st.info("Nenhum carregamento ativo no momento.")
+            cor = "#28a745" if minutos <= 10 else "#ffc107" if minutos <= 15 else "#dc3545"
+            with cols_mon[i % 4]:
+                st.markdown(f'<div class="fleet-card" style="background:{cor};"><p class="fleet-plate">{row.placa}</p><p class="fleet-name">{row.nome[:15]}</p><p class="fleet-time">{minutos} min</p></div>', unsafe_allow_html=True)
+    else: st.info("Pátio vazio.")
