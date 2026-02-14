@@ -172,64 +172,61 @@ with tab1:
 with tab2:
     st.write("### 🚚 Monitoramento de Pátio (Grid Compacto)")
     
-    # Campo de Bipagem com limpeza automática via Session State
-    if "input_driver" not in st.session_state:
-        st.session_state.input_driver = ""
+    # Campo de Bipagem sem callback imediato para dar tempo ao banco
+    d_id = st.text_input("🆔 Bipar Driver ID:", key="input_driver_sync", value="").strip()
 
-    def limpar_bip():
-        st.session_state.last_bip_fleet = st.session_state.input_driver
-        st.session_state.input_driver = "" # Zera o campo imediatamente
-
-    d_id = st.text_input(
-        "🆔 Bipar Driver ID:", 
-        value=st.session_state.input_driver,
-        key="input_driver", 
-        on_change=limpar_bip # Dispara a limpeza ao bipar
-    ).strip()
-
-    # Processamento do registro
-    if d_id and st.session_state.get('last_bip_fleet') == d_id:
+    if d_id:
+        # 1. Busca os dados do motorista na base local
         match = df_fleet_base[df_fleet_base['driver_id'].astype(str) == d_id] if not df_fleet_base.empty else pd.DataFrame()
         
         if not match.empty:
             nome, placa = match['driver_name'].values[0], match['license_plate'].values[0]
             
-            # Busca registro aberto (Anti-duplicidade)
+            # 2. Verifica registro aberto (Anti-duplicidade)
             aberto = conn.table("log_fleet").select("*").eq("driver_id", str(d_id)).is_("saida", "null").eq("data", hoje_str).execute()
             
-            if aberto.data:
-                # Saída: Calcula tempo e fecha registro
-                res = aberto.data[0]
-                ent = datetime.fromisoformat(res['entrada'].replace('Z', '+00:00'))
-                tempo_txt = f"{int((datetime.now().astimezone() - ent).total_seconds() // 60)} min"
-                
-                conn.table("log_fleet").update({
-                    "saida": datetime.now().isoformat(),
-                    "status": "Finalizado",
-                    "tempo_hub": tempo_txt
-                }).eq("id", res['id']).execute()
-                st.toast(f"🏁 FINALIZADO: {nome}")
-            else:
-                # Entrada: Inicia novo carregamento
-                conn.table("log_fleet").insert({
-                    "driver_id": str(d_id),
-                    "nome": nome,
-                    "placa": placa,
-                    "data": hoje_str,
-                    "status": "Em Carregamento",
-                    "entrada": datetime.now().isoformat()
-                }).execute()
-                
-                if not st.session_state.ops_clock_running:
-                    st.session_state.ops_clock_running, st.session_state.ops_start_time = True, datetime.now()
-                st.toast(f"🚚 CARREGANDO: {nome}")
-            
-            # Reseta a trava e recarrega para limpar o campo visualmente
-            st.session_state.last_bip_fleet = None
+            try:
+                if aberto.data:
+                    # Finaliza rota existente
+                    res = aberto.data[0]
+                    ent = datetime.fromisoformat(res['entrada'].replace('Z', '+00:00'))
+                    tempo_txt = f"{int((datetime.now().astimezone() - ent).total_seconds() // 60)} min"
+                    
+                    conn.table("log_fleet").update({
+                        "saida": datetime.now().isoformat(),
+                        "status": "Finalizado",
+                        "tempo_hub": tempo_txt
+                    }).eq("id", res['id']).execute()
+                    st.toast(f"🏁 FINALIZADO: {nome}")
+                else:
+                    # Inicia novo carregamento
+                    conn.table("log_fleet").insert({
+                        "driver_id": str(d_id),
+                        "nome": nome,
+                        "placa": placa,
+                        "data": hoje_str,
+                        "status": "Em Carregamento",
+                        "entrada": datetime.now().isoformat()
+                    }).execute()
+                    
+                    if not st.session_state.ops_clock_running:
+                        st.session_state.ops_clock_running, st.session_state.ops_start_time = True, datetime.now()
+                    st.toast(f"🚚 CARREGANDO: {nome}")
+
+                # --- 🔑 O SEGREDO DA LIMPEZA SEGURA ---
+                # Só chegamos aqui se o banco de dados NÃO der erro
+                time.sleep(0.3) # Pequena pausa de segurança para o bip ser processado
+                st.rerun() # O rerun limpa o campo naturalmente por causa do 'value=""'
+
+            except Exception as e:
+                st.error(f"Erro ao registrar: {e}")
+        else:
+            st.warning(f"Driver ID {d_id} não encontrado na base fleet.")
+            time.sleep(1)
             st.rerun()
 
     st.divider()
-    # Grade de cards compacta (Manteve-se igual)
+      # Grade de cards compacta (Manteve-se igual)
     # ... (lógica de exibição dos cards) ...
     logs_live = conn.table("log_fleet").select("*").eq("data", hoje_str).is_("saida", "null").execute()
     if logs_live.data:
@@ -240,4 +237,5 @@ with tab2:
             with cols_mon[i % 4]:
                 st.markdown(f'<div class="fleet-card" style="background:{cor};"><p class="fleet-plate">{row.placa}</p><p class="fleet-name">{row.nome[:15]}</p><p class="fleet-time">{minutos} min</p></div>', unsafe_allow_html=True)
     else: st.info("Pátio vazio.")
+
 
